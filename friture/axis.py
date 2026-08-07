@@ -6,6 +6,7 @@ from friture.plotting.scaleDivision import ScaleDivision
 
 class Axis(QtCore.QObject):
     name_changed = QtCore.pyqtSignal(str)
+    range_changed = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,10 +38,24 @@ class Axis(QtCore.QObject):
     def setRange(self, scale_min, scale_max):
         self._scale_division.setRange(scale_min, scale_max)
         self._coordinate_transform.setRange(scale_min, scale_max)
+        self.range_changed.emit()
 
     def setScale(self, scale):
         self._scale_division.setScale(scale)
         self._coordinate_transform.setScale(scale)
+        self.range_changed.emit()
+
+    # coordinate_transform maps values through slots, and QML cannot see the
+    # axis state a slot reads. These two exist so a binding that calls
+    # toScreen() can name the dependency and be re-evaluated when the
+    # displayed range or scale changes.
+    @pyqtProperty(float, notify=range_changed) # type: ignore
+    def range_min(self):
+        return self._coordinate_transform.coord_min
+
+    @pyqtProperty(float, notify=range_changed) # type: ignore
+    def range_max(self):
+        return self._coordinate_transform.coord_max
 
     @pyqtProperty(ScaleDivision, constant=True) # type: ignore
     def scale_division(self):

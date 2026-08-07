@@ -21,6 +21,7 @@ from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtProperty, pyqtSignal
 
 from friture.level_view_model import LevelViewModel
+from friture.listen.listen_band_view_model import GetListenBand, ListenBandViewModel
 from friture.main_toolbar_view_model import MainToolbarViewModel
 from friture.playback.playback_control_view_model import PlaybackControlViewModel
 
@@ -46,6 +47,13 @@ class MainWindowViewModel(QtCore.QObject):
     @pyqtProperty(PlaybackControlViewModel, constant=True) # type: ignore
     def playback_control_view_model(self):
         return self._playback_control_view_model
+
+    # Not owned here: the plots reach the same band through GetListenBand()
+    # as they are created, which is the only way to share it when there may
+    # be no spectrogram, or three of them.
+    @pyqtProperty(ListenBandViewModel, constant=True) # type: ignore
+    def listen_band_view_model(self):
+        return GetListenBand()
     
     def get_playback_control_enabled(self) -> bool:
         return self._playback_control_enabled

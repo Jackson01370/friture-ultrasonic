@@ -20,7 +20,7 @@
 """Spectrogram widget, that displays a rolling 2D image of the time-frequency spectrum."""
 
 from PyQt5.QtCore import QObject
-from numpy import log10, floor, zeros, float64, tile, array, ndarray
+from numpy import log10, floor, zeros, float64, sqrt, tile, array, ndarray
 from friture.audiobuffer import AudioBuffer
 from friture.imageplot import ImagePlot
 from friture.audioproc import audioproc
@@ -40,6 +40,7 @@ from friture.spectrogram_settings import (Spectrogram_Settings_Dialog,  # settin
 import friture.plotting.frequency_scales as fscales
 
 from friture.audiobackend import SAMPLING_RATE, FRAMES_PER_BUFFER, AudioBackend
+from friture.listen.spectral_background import SpectralBackground
 from fractions import Fraction
 
 
@@ -87,6 +88,14 @@ class Spectrogram_Widget(QObject):
 
         self.timerange_s = DEFAULT_TIMERANGE
 
+        # Optional background subtraction for the display. The same component
+        # the audio path uses, but applied straight to the spectrum that is
+        # already being computed here -- no transform, no resynthesis, no
+        # latency. Off by default: what is drawn should be what was measured
+        # unless someone asks otherwise.
+        self.denoise = False
+        self.background = None
+
         self.old_index = 0
         self.overlap = 3. / 4.
         self.overlap_frac = Fraction(3, 4)
@@ -94,7 +103,7 @@ class Spectrogram_Widget(QObject):
 
         self.PlotZoneImage.setfreqrange(self.minfreq, self.maxfreq)
         self.PlotZoneImage.setspecrange(self.spec_min, self.spec_max)
-        self.PlotZoneImage.setweighting(self.weighting)
+        self.PlotZoneImage.setweighting(self.weighting, self.denoise)
         self.PlotZoneImage.settimerange(self.timerange_s, self.dT_s)
         self.update_jitter()
 
@@ -158,6 +167,9 @@ class Spectrogram_Widget(QObject):
 
                 self.old_index += int(needed)
 
+            if self.denoise:
+                spn = self.subtract_background(spn)
+
             w = tile(self.w, (1, realizable))
             norm_spectrogram = self.scale_spectrogram(self.log_spectrogram(spn) + w)
 
@@ -200,6 +212,44 @@ class Spectrogram_Widget(QObject):
         # defer the restart until we get data from the audio source (so that a fresh lastdatatime is passed to the spectrogram image)
         self.mustRestart = True
 
+    def subtract_background(self, power_spectrum):
+        """Flatten what has been in every frame anyway, then dim what is left.
+
+        Two steps, and the first is the one that matters here. Flattening
+        divides each bin by its own background, so a steady interfering line
+        and the tilt of the noise floor both disappear into one even level
+        and only what is NEW stands above it. Attenuating alone would not do
+        that: it lowers the line and its surroundings equally and leaves the
+        line just as prominent, which is what the measurements showed.
+
+        The second step then dims the bins that are merely at background, so
+        the flattened floor goes dark rather than uniformly grey.
+
+        analyzelive returns power and SpectralBackground works in amplitude,
+        hence the square roots and squares. Column by column, because the
+        background is a running estimate and these are consecutive frames.
+        """
+        if self.background is None or self.background.n_bins != power_spectrum.shape[0]:
+            self.background = SpectralBackground(
+                n_bins=power_spectrum.shape[0],
+                frame_rate=float(SAMPLING_RATE) / (self.fft_size * (1. - self.overlap)))
+
+        cleaned = zeros(power_spectrum.shape, dtype=float64)
+        for i in range(power_spectrum.shape[1]):
+            gain = self.background.process(sqrt(power_spectrum[:, i]))
+            gain = gain * self.background.flatten_gain()
+            cleaned[:, i] = power_spectrum[:, i] * gain ** 2
+        return cleaned
+
+    def set_denoise(self, denoise):
+        self.denoise = denoise
+        # A new estimate: the old one was learned through whatever settings
+        # were in force before.
+        self.background = None
+        # The colour axis is the one label always on screen, so it is where a
+        # viewer will see that these are no longer raw levels.
+        self.PlotZoneImage.setweighting(self.weighting, self.denoise)
+
     def setminfreq(self, freq):
         self.minfreq = freq
         self.PlotZoneImage.setfreqrange(self.minfreq, self.maxfreq)
@@ -207,6 +257,7 @@ class Spectrogram_Widget(QObject):
 
     def setmaxfreq(self, freq):
         self.maxfreq = freq
+        self.background = None
         self.PlotZoneImage.setfreqrange(self.minfreq, self.maxfreq)
         self.frequency_resampler.setfreqrange(self.minfreq, self.maxfreq)
         self.proc.set_maxfreq(freq)
@@ -220,6 +271,7 @@ class Spectrogram_Widget(QObject):
 
     def setfftsize(self, fft_size):
         self.fft_size = fft_size
+        self.background = None
 
         self.proc.set_fftsize(fft_size)
         self.update_weighting()
@@ -243,7 +295,7 @@ class Spectrogram_Widget(QObject):
 
     def setweighting(self, weighting):
         self.weighting = weighting
-        self.PlotZoneImage.setweighting(weighting)
+        self.PlotZoneImage.setweighting(weighting, self.denoise)
         self.update_weighting()
 
     def update_weighting(self):

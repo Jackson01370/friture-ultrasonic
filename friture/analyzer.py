@@ -51,6 +51,9 @@ from friture.tilelayout import TileLayout
 from friture.level_view_model import LevelViewModel
 from friture.level_data import LevelData
 from friture.levels import Levels_Widget
+from friture.listen.listen_band_view_model import GetListenBand, ListenBandViewModel
+from friture.listen.monitor import LiveMonitor
+from friture.listen.processor import BandProcessor
 from friture.main_window_view_model import MainWindowViewModel
 from friture.store import GetStore, Store
 from friture.scope_data import Scope_Data
@@ -113,6 +116,7 @@ class Friture(QMainWindow, ):
         qmlRegisterType(LevelData, 'Friture', 1, 0, 'LevelData')
         qmlRegisterType(LevelViewModel, 'Friture', 1, 0, 'LevelViewModel')
         qmlRegisterType(PlaybackControlViewModel, 'Friture', 1, 0, 'PlaybackControlViewModel')
+        qmlRegisterType(ListenBandViewModel, 'Friture', 1, 0, 'ListenBandViewModel')
         qmlRegisterType(MainWindowViewModel, 'Friture', 1, 0, 'MainWindowViewModel')
         qmlRegisterType(MainToolbarViewModel, 'Friture', 1, 0, 'MainToolbarViewModel')
         qmlRegisterType(Axis, 'Friture', 1, 0, 'Axis')
@@ -146,6 +150,14 @@ class Friture(QMainWindow, ):
 
         self.player = Player(self)
         self.audiobuffer.new_data_available.connect(self.player.handle_new_data)
+
+        # Band listening. The player and the live monitor filter the same
+        # band but each keeps its own filter state: their two streams are
+        # unrelated, and one tail must not leak into the other.
+        listen_band = GetListenBand()
+        self.player.set_band_processor(BandProcessor(self.player, listen_band))
+        self.listen_monitor = LiveMonitor(self, listen_band)
+        self.audiobuffer.new_data_available.connect(self.listen_monitor.handle_new_data)
 
         # this timer is used to update widgets that just need to display as fast as they can
         self.display_timer = QtCore.QTimer()
@@ -237,6 +249,7 @@ class Friture(QMainWindow, ):
 
     # event handler
     def closeEvent(self, event):
+        self.listen_monitor.set_running(False)
         AudioBackend().close()
         self.saveAppState()
         event.accept()

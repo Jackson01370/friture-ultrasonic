@@ -22,6 +22,7 @@ from PyQt5.QtCore import QObject
 from friture.spectrogram_data import Spectrogram_Data
 from friture.spectrogram_item_data import SpectrogramImageData
 from friture.store import GetStore
+from friture.listen.listen_band_view_model import GetListenBand
 from friture.pitch_tracker import format_frequency
 
 class ImagePlot(QObject):
@@ -47,6 +48,10 @@ class ImagePlot(QObject):
         self._spectrogram_data.horizontal_axis.setRange(0, 10)
         self._spectrogram_data.color_axis.setRange(-140, 0)
         self._spectrogram_data.show_color_axis = True
+
+        # frequency runs up the side here, so a click's height is what picks
+        # the band
+        self._spectrogram_data.set_listen_band(GetListenBand(), "vertical")
 
     def qml_file_name(self):
         return "ImagePlot.qml"
@@ -95,7 +100,7 @@ class ImagePlot(QObject):
 
         self._spectrogram_data.color_axis.setRange(spec_min, spec_max)
 
-    def setweighting(self, weighting):
+    def setweighting(self, weighting, denoised=False):
         if weighting == 0:
             title = "PSD (dB)"
         elif weighting == 1:
@@ -104,5 +109,11 @@ class ImagePlot(QObject):
             title = "PSD (dB B)"
         else:
             title = "PSD (dB C)"
+
+        # Say so on the axis: a plot with its background subtracted is no
+        # longer showing measured levels, and nothing else on screen would
+        # give that away.
+        if denoised:
+            title += ", background subtracted"
 
         self._spectrogram_data.color_axis.name = title

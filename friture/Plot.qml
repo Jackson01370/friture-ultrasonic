@@ -65,6 +65,9 @@ Rectangle {
             vertical_axis: scopedata.vertical_axis
             horizontal_axis: scopedata.horizontal_axis
 
+            listen_band: scopedata.listen_band
+            freq_axis: scopedata.freq_axis
+
             Item {
                 id: plotItemPlaceholder
                 anchors.fill: parent

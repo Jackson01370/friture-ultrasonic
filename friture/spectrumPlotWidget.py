@@ -13,6 +13,7 @@ from friture.audiobackend import SAMPLING_RATE
 from friture.plotting.coordinateTransform import CoordinateTransform
 from friture.spectrum_data import Spectrum_Data
 from friture.filled_curve import CurveType, FilledCurve
+from friture.listen.listen_band_view_model import GetListenBand
 from friture.pitch_tracker import format_frequency
 from friture.store import GetStore
 
@@ -50,6 +51,10 @@ class SpectrumPlotWidget(QObject):
 
         self._spectrum_data.vertical_axis.setRange(0, 1)
         self._spectrum_data.horizontal_axis.setRange(0, 22000)
+
+        # frequency runs along the bottom here, so a click's position across
+        # the plot is what picks the band
+        self._spectrum_data.set_listen_band(GetListenBand(), "horizontal")
 
         self._baseline = Baseline.PLOT_BOTTOM
 

@@ -24,13 +24,18 @@ from friture.audiobackend import SAMPLING_RATE
 import friture.plotting.frequency_scales as fscales
 
 # shared with spectrum_settings.py
-DEFAULT_FFT_SIZE = 8  # 8192 points
-DEFAULT_FREQ_SCALE = 2  # Mel
-DEFAULT_MAXFREQ = 20000
+DEFAULT_FFT_SIZE = 9  # 16384 points -- see spectrogram_settings
+DEFAULT_FREQ_SCALE = 1  # Logarithmic -- see spectrogram_settings
+# The whole captured band. 20 kHz was the edge of hearing; it is not the edge
+# of what this microphone picks up.
+DEFAULT_MAXFREQ = SAMPLING_RATE / 2
 DEFAULT_MINFREQ = 20
 DEFAULT_SPEC_MIN = -100
 DEFAULT_SPEC_MAX = -20
-DEFAULT_WEIGHTING = 1  # A
+# None, not A. A-weighting is the ear's own sensitivity curve and is close to
+# -50 dB by 20 kHz, so weighting an ultrasonic spectrum by it would bury
+# exactly what this build exists to show.
+DEFAULT_WEIGHTING = 0  # None
 DEFAULT_SHOW_FREQ_LABELS = True
 DEFAULT_SHOW_PITCH_LABELS = True
 DEFAULT_RESPONSE_TIME = 0.025

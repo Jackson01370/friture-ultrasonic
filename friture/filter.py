@@ -3,7 +3,13 @@ from numpy import arange, sqrt, zeros, array
 from friture_extensions.lfilter import pyx_lfilter_float64_1D
 from .signal.decimate import decimate
 
-NOCTAVE = 9
+# How many octaves of bands there are. The set is anchored on 1 kHz and grows
+# both ways, so this decides the top as much as the bottom: nine gave 62 Hz to
+# 16 kHz, which was the whole of hearing at 48 kHz but stops a long way short
+# of a 125 kHz Nyquist. Thirteen reaches 64 kHz at the top -- one more octave
+# and the highest band's upper edge would run past Nyquist and the design
+# would have nothing to work with.
+NOCTAVE = 13
 
 
 def ERBFilterBank(forward, feedback, x):

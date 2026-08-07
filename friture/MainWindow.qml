@@ -3,6 +3,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.2
 import Friture 1.0
 import "./playback"
+import "./listen"
 
 Rectangle {
     id: main_window
@@ -15,7 +16,7 @@ Rectangle {
     GridLayout {
         objectName: "main_row_layout"
         anchors.fill: parent
-        rows: main_window.main_window_view_model.playback_control_enabled ? 2 : 1
+        rows: 2
         columns: 2
         rowSpacing: 3
         columnSpacing: 3
@@ -23,7 +24,7 @@ Rectangle {
         Levels {
             level_view_model: main_window.main_window_view_model.level_view_model
             Layout.row: 0
-            Layout.rowSpan: main_window.main_window_view_model.playback_control_enabled ? 2 : 1
+            Layout.rowSpan: 2
             Layout.column: 0
             Layout.fillHeight: true
             Layout.margins: 5
@@ -40,16 +41,32 @@ Rectangle {
             Layout.margins: 5
         }
 
-        PlaybackControl {
-            id: playbackControl
+        // Both control rows share one grid row on purpose. A row each would
+        // leave an empty row whenever playback is hidden, and Levels spans
+        // the rows with fillHeight -- so the empty row would still claim a
+        // share of the height and squeeze the plots into the top half.
+        ColumnLayout {
             Layout.row: 1
             Layout.column: 1
             Layout.fillWidth: true
             Layout.margins: 5
+            spacing: 3
 
-            viewModel: main_window.main_window_view_model.playback_control_view_model
+            PlaybackControl {
+                id: playbackControl
+                Layout.fillWidth: true
 
-            visible: main_window.main_window_view_model.playback_control_enabled
+                viewModel: main_window.main_window_view_model.playback_control_view_model
+
+                visible: main_window.main_window_view_model.playback_control_enabled
+            }
+
+            ListenControl {
+                id: listenControl
+                Layout.fillWidth: true
+
+                viewModel: main_window.main_window_view_model.listen_band_view_model
+            }
         }
     }
 }

@@ -26,9 +26,28 @@ import rtmixer
 from numpy import ndarray, vstack, int8, int16, float64, float32, frombuffer, concatenate
 import numpy as np
 
-# the sample rate below should be dynamic, taken from PyAudio/PortAudio
-SAMPLING_RATE = 48000
-FRAMES_PER_BUFFER = 512
+# This build captures ultrasound. 250 kHz is not a preference: it is the one
+# rate the UltraMic 250K will open at, and only in WASAPI exclusive mode with
+# a single channel -- see open_stream. Nyquist is therefore 125 kHz.
+#
+# Everything downstream reads this constant, so an ordinary 48 kHz microphone
+# cannot be used with this build. That is the trade for not having to thread a
+# runtime rate through 78 call sites; use the released Friture for normal audio.
+SAMPLING_RATE = 250000
+
+# Playback is a different rate, and has to be: no sound card takes 250 kHz.
+# Whatever is heard is resampled down to this on the way out, which is also
+# why heterodyne is the only listening mode that means anything up here --
+# no filter makes a 40 kHz sound audible, only moving it does.
+OUTPUT_SAMPLING_RATE = 48000
+
+# 2048 frames is 8.2 ms at 250 kHz, about what 512 was at 48 kHz. Kept in that
+# range on purpose: the display timer drains whole buffers every 10 ms, so a
+# much smaller one just multiplies signal emissions per tick.
+FRAMES_PER_BUFFER = 2048
+
+# The same 10.7 ms, counted at the playback rate.
+OUTPUT_FRAMES_PER_BUFFER = 512
 
 __audiobackendInstance = None
 
@@ -122,9 +141,25 @@ class __AudioBackend(QtCore.QObject):
         self.devices_with_timing_errors = []
 
     def close(self):
-        if self.stream is not None:
+        self.release_stream()
+
+    def release_stream(self):
+        """Stop AND close the capture stream, giving the device back.
+
+        Closing matters here in a way it did not before: WASAPI grants
+        exclusive access to one stream at a time, and a merely stopped stream
+        still holds it. Leave one open and the next exclusive attempt fails
+        with "Invalid device" -- from the message alone it looks like the
+        microphone is at fault rather than us.
+        """
+        if self.stream is None:
+            return
+        try:
             self.stream.stop()
-            self.stream = None
+            self.stream.close()
+        except Exception:
+            self.logger.exception("Failed to release the capture stream")
+        self.stream = None
 
     # method
     def get_readable_devices_list(self):
@@ -200,35 +235,38 @@ class __AudioBackend(QtCore.QObject):
         return index
 
     # method
-    # returns a list of input devices index, starting with the system default
+    # returns a list of input devices index
     def get_input_devices(self):
+        """The devices that could actually capture at SAMPLING_RATE.
+
+        WASAPI only, and deliberately so. Every microphone on this machine
+        also appears under MME and DirectSound, and those entries would open
+        happily at 250 kHz and hand back upsampled 48 kHz audio -- so offering
+        them is offering six ways to silently record nothing above 24 kHz.
+        The same device under WASAPI either works or says why.
+
+        This also drops the "default input device first" ordering: the system
+        default is whatever Windows uses for calls, which is never the one
+        wanted here, and putting it first only meant a failed attempt before
+        reaching a usable entry.
+        """
         devices = sounddevice.query_devices()
 
-        # early exit if there is no input device. Otherwise query_devices(kind='input') fails
-        input_devices = [device for device in devices if device['max_input_channels'] > 0]
-
-        if len(input_devices) == 0:
-            return []
-
-        try:
-            default_input_device = sounddevice.query_devices(kind='input')
-        except sounddevice.PortAudioError:
-            self.logger.exception("Failed to query the default input device")
-            default_input_device = None
-
         input_devices = []
-        if default_input_device is not None:
-            # start by the default input device
-            default_input_device['index'] = devices.index(default_input_device)
-            input_devices += [default_input_device]
+        for index, device in enumerate(devices):
+            if device['max_input_channels'] <= 0:
+                continue
+            host_api = sounddevice.query_hostapis(device['hostapi'])['name']
+            if "WASAPI" not in host_api.upper():
+                continue
+            device['index'] = index
+            input_devices += [device]
 
-        for device in devices:
-            # select only the input devices by looking at the number of input channels
-            if device['max_input_channels'] > 0:
-                device['index'] = devices.index(device)
-                # default input device has already been inserted
-                if default_input_device is not None and device['index'] != default_input_device['index']:
-                    input_devices += [device]
+        if not input_devices:
+            self.logger.warning(
+                "No WASAPI input device found, so nothing can be captured at "
+                "%d Hz. Other host APIs are not offered because they would "
+                "resample rather than refuse.", SAMPLING_RATE)
 
         return input_devices
 
@@ -261,14 +299,17 @@ class __AudioBackend(QtCore.QObject):
     def select_input_device(self, index):
         device = self.input_devices[index]
 
-        # save current stream in case we need to restore it
-        previous_stream = self.stream
-        previous_ringBuffer = self.ringBuffer
-        previous_action = self.action
-        previous_nchannels_max = self.nchannels_max
         previous_device = self.device
 
         self.logger.info("Trying to open input device #%d", index)
+
+        # The old stream goes FIRST, before the new one is attempted. Opening
+        # the new one first and keeping the old as a fallback is the friendlier
+        # order, and it is what this did -- but WASAPI exclusive mode cannot be
+        # granted while any other capture stream is running, so with a stream
+        # still open every attempt here fails with "Invalid device". Closing
+        # first costs the fallback; there is no way to have both.
+        self.release_stream()
 
         try:
             (self.stream, self.ringBuffer, self.action, self.nchannels_max) = self.open_stream(device)
@@ -280,20 +321,11 @@ class __AudioBackend(QtCore.QObject):
         except Exception:
             self.logger.exception("Failed to open input device")
             success = False
-            if self.stream is not None:
-                self.stream.stop()
-            # restore previous stream
-            self.stream = previous_stream
-            self.ringBuffer = previous_ringBuffer
-            self.action = previous_action
-            self.nchannels_max = previous_nchannels_max
+            self.stream = None
             self.device = previous_device
 
         if success:
             self.logger.info("Success")
-
-            if previous_stream is not None:
-                previous_stream.stop()
 
             self.first_channel = 0
             nchannels = self.device['max_input_channels']
@@ -322,17 +354,9 @@ class __AudioBackend(QtCore.QObject):
 
         self.logger.info("Opening the stream for device '%s'", device['name'])
 
-        # by default we open the device stream with all the channels
-        # (interleaved in the data buffer)
-        stream = rtmixer.Recorder(
-            device=device['index'],
-            channels=device['max_input_channels'],
-            blocksize=FRAMES_PER_BUFFER,
-            # latency=latency,
-            samplerate=SAMPLING_RATE)
+        stream, nchannels_max = self.open_recorder(device)
 
         sampleSize = 4  # the sample size in bytes (float32)
-        nchannels_max = device['max_input_channels']  # the number of channels that we record
         elementSize = nchannels_max * sampleSize
 
         # arbitrary size to avoid overflows without using too much memory
@@ -351,8 +375,62 @@ class __AudioBackend(QtCore.QObject):
 
         return (stream, ringBuffer, action, nchannels_max)
 
+    def open_recorder(self, device):
+        """Open the capture stream, insisting on a mode that is really 250 kHz.
+
+        WASAPI exclusive mode, and a single channel, is the only combination
+        the UltraMic 250K actually runs at this rate. It matters that this
+        does not quietly settle for less: ask MME or DirectSound for 250 kHz
+        and they say yes, hand back samples at roughly the right count, and
+        fill them with 48 kHz audio stretched to fit -- a spectrogram with a
+        hard edge at 24 kHz and nothing above it, looking for all the world
+        like a quiet night.
+
+        So the exclusive attempts come first, and a shared-mode stream is
+        opened only as a last resort and shouted about.
+        """
+        host_api = sounddevice.query_hostapis(device['hostapi'])['name']
+        if "WASAPI" not in host_api.upper():
+            # Not a fallback worth having. MME and DirectSound accept 250 kHz,
+            # return roughly the right number of samples, and fill them with
+            # 48 kHz audio stretched to fit: a spectrogram with a hard edge at
+            # 24 kHz and nothing above it, which reads as a quiet night rather
+            # than as a broken capture. Refusing is the honest answer.
+            raise RuntimeError(
+                "'%s' is on %s, which cannot capture at %d Hz -- it would "
+                "resample and the ultrasound would be silently lost. Use the "
+                "WASAPI entry for this microphone."
+                % (device['name'], host_api, SAMPLING_RATE))
+
+        exclusive = sounddevice.WasapiSettings(exclusive=True)
+        failures = []
+        # Mono first: the shared-mode mix format may claim two channels while
+        # the hardware only offers one at its native rate.
+        for channels in (1, device['max_input_channels']):
+            if channels < 1 or any(channels == tried for tried, _ in failures):
+                continue
+            try:
+                stream = rtmixer.Recorder(
+                    device=device['index'],
+                    channels=channels,
+                    blocksize=FRAMES_PER_BUFFER,
+                    samplerate=SAMPLING_RATE,
+                    extra_settings=exclusive)
+            except Exception as exception:
+                failures.append((channels, exception))
+                continue
+
+            self.logger.info("Opened '%s' at %d Hz, WASAPI exclusive, %d channel(s)",
+                             device['name'], SAMPLING_RATE, channels)
+            return stream, channels
+
+        raise RuntimeError(
+            "Could not open '%s' in WASAPI exclusive mode at %d Hz.\n  %s"
+            % (device['name'], SAMPLING_RATE,
+               "\n  ".join("%d channel(s): %s" % f for f in failures)))
+
     def log_supported_input_formats(self, device):
-        samplerates = [22050, 44100, 48000, 96000]
+        samplerates = [22050, 44100, 48000, 96000, 192000, 250000, 384000]
         dtypes = [float32, int16, int8]
         supported_formats = []
         for samplerate in samplerates:
@@ -373,11 +451,11 @@ class __AudioBackend(QtCore.QObject):
 
     # method
     def open_output_stream(self, device, callback):
-        # by default we open the device stream with all the channels
-        # (interleaved in the data buffer)
+        # OUTPUT_SAMPLING_RATE, not SAMPLING_RATE: no sound card takes the
+        # capture rate. Callers are responsible for arriving here at 48 kHz.
         stream = sounddevice.OutputStream(
-            samplerate=SAMPLING_RATE,
-            blocksize=FRAMES_PER_BUFFER,
+            samplerate=OUTPUT_SAMPLING_RATE,
+            blocksize=OUTPUT_FRAMES_PER_BUFFER,
             device=device['index'],
             channels=device['max_output_channels'],
             dtype=int16,
@@ -392,7 +470,7 @@ class __AudioBackend(QtCore.QObject):
             device=device['index'],
             channels=device['max_output_channels'],
             dtype=output_format,
-            samplerate=SAMPLING_RATE)
+            samplerate=OUTPUT_SAMPLING_RATE)
 
     # method
     # return the index of the current input device in the input devices list

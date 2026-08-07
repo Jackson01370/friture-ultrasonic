@@ -24,14 +24,22 @@ from friture.audiobackend import SAMPLING_RATE
 import friture.plotting.frequency_scales as fscales
 
 # shared with spectrogram.py
-DEFAULT_FFT_SIZE = 7  # 4096 points
-DEFAULT_FREQ_SCALE = 2  # Mel
+# 16384 points, not 4096: at 250 kHz that is a 15 Hz bin, about what 4096
+# gave at 48 kHz. Keeping the old size would have cost a factor of five in
+# frequency resolution for nothing.
+DEFAULT_FFT_SIZE = 9  # 16384 points
+# Logarithmic, not Mel. Mel is a model of human pitch perception and flattens
+# everything above ~8 kHz into almost no space at all -- on a 125 kHz axis it
+# would leave the entire ultrasonic range unreadable.
+DEFAULT_FREQ_SCALE = 1  # Logarithmic
 DEFAULT_MAXFREQ = SAMPLING_RATE / 2
 DEFAULT_MINFREQ = 20
 DEFAULT_SPEC_MIN = -140
 DEFAULT_SPEC_MAX = 0
 DEFAULT_TIMERANGE = 10.
 DEFAULT_WEIGHTING = 0  # None
+# Off: the plot shows what was measured unless someone asks for otherwise.
+DEFAULT_DENOISE = False
 
 
 class Spectrogram_Settings_Dialog(QtWidgets.QDialog):
@@ -122,7 +130,18 @@ class Spectrogram_Settings_Dialog(QtWidgets.QDialog):
         self.formLayout.addRow("Max frequency:", self.spinBox_maxfreq)
         self.formLayout.addRow("Min color:", self.spinBox_specmin)
         self.formLayout.addRow("Max color:", self.spinBox_specmax)
+        self.checkBox_denoise = QtWidgets.QCheckBox(self)
+        self.checkBox_denoise.setObjectName("checkBox_denoise")
+        self.checkBox_denoise.setChecked(DEFAULT_DENOISE)
+        self.checkBox_denoise.setToolTip(
+            "Learn what is in every frame anyway and subtract it, so steady "
+            "interference and the microphone's own floor drop away and faint "
+            "calls stand out. The plot then shows a processed value rather "
+            "than a measured one, which the colour axis label says while it "
+            "is on.")
+
         self.formLayout.addRow("Middle-ear weighting:", self.comboBox_weighting)
+        self.formLayout.addRow("Subtract background:", self.checkBox_denoise)
 
         self.setLayout(self.formLayout)
 
@@ -134,6 +153,7 @@ class Spectrogram_Settings_Dialog(QtWidgets.QDialog):
         self.spinBox_specmax.valueChanged.connect(view_model.setmax)
         self.doubleSpinBox_timerange.valueChanged.connect(view_model.timerangechanged)
         self.comboBox_weighting.currentIndexChanged.connect(view_model.setweighting)
+        self.checkBox_denoise.toggled.connect(view_model.set_denoise)
 
     # slot
     def fftsizechanged(self, index):
@@ -156,6 +176,7 @@ class Spectrogram_Settings_Dialog(QtWidgets.QDialog):
         settings.setValue("colorMin", self.spinBox_specmin.value())
         settings.setValue("colorMax", self.spinBox_specmax.value())
         settings.setValue("weighting", self.comboBox_weighting.currentIndex())
+        settings.setValue("denoise", self.checkBox_denoise.isChecked())
 
     # method
     def restoreState(self, settings):
@@ -167,6 +188,8 @@ class Spectrogram_Settings_Dialog(QtWidgets.QDialog):
         self.comboBox_freqscale.setCurrentIndex(freqscale)
         freqMin = settings.value("freqMin", DEFAULT_MINFREQ, type=int)
         self.spinBox_minfreq.setValue(freqMin)
+        self.checkBox_denoise.setChecked(
+            settings.value("denoise", DEFAULT_DENOISE, type=bool))
         freqMax = settings.value("freqMax", DEFAULT_MAXFREQ, type=int)
         self.spinBox_maxfreq.setValue(freqMax)
         colorMin = settings.value("colorMin", DEFAULT_SPEC_MIN, type=int)

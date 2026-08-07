@@ -23,11 +23,13 @@ from PyQt5.QtQml import QQmlListProperty # type: ignore
 
 from friture.axis import Axis
 from friture.curve import Curve
+from friture.listen.listen_band_view_model import ListenBandViewModel
 
 class Scope_Data(QtCore.QObject):
     show_color_axis_changed = QtCore.pyqtSignal(bool)
     show_legend_changed = QtCore.pyqtSignal(bool)
     plot_items_changed = QtCore.pyqtSignal()
+    listen_band_changed = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,6 +40,8 @@ class Scope_Data(QtCore.QObject):
         self._color_axis = Axis(self)
         self._show_color_axis = False
         self._show_legend = True
+        self._listen_band = None
+        self._freq_axis = ""
 
     @pyqtProperty(QQmlListProperty, notify=plot_items_changed) # type: ignore
     def plot_items(self):
@@ -78,6 +82,23 @@ class Scope_Data(QtCore.QObject):
             self._show_color_axis = show_color_axis
             self.show_color_axis_changed.emit(show_color_axis)
     
+    # Band listening. Only the plots that actually have a frequency axis set
+    # these; everywhere else listen_band stays null and the plot behaves
+    # exactly as it did before.
+    def set_listen_band(self, listen_band, freq_axis):
+        """freq_axis is "vertical" or "horizontal": which axis is in Hz."""
+        self._listen_band = listen_band
+        self._freq_axis = freq_axis
+        self.listen_band_changed.emit()
+
+    @pyqtProperty(ListenBandViewModel, notify=listen_band_changed) # type: ignore
+    def listen_band(self):
+        return self._listen_band
+
+    @pyqtProperty(str, notify=listen_band_changed) # type: ignore
+    def freq_axis(self):
+        return self._freq_axis
+
     @pyqtProperty(bool, notify=show_legend_changed) # type: ignore
     def show_legend(self):
         return self._show_legend

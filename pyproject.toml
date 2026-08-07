@@ -37,6 +37,7 @@ dependencies = [
     "rtmixer==0.1.7",
     "docutils==0.23",
     "numpy==2.4.6",
+    "soxr>=0.3",
     "PyQt5==5.15.11",
     "platformdirs==4.11.0",
     "pyrr==0.10.3",
@@ -73,6 +74,7 @@ python_files = ["test_*.py"]
 [tool.setuptools]
 packages=[
     "friture",
+    "friture.listen",
     "friture.playback",
     "friture.plotting",
     "friture.generators",

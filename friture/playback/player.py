@@ -24,12 +24,24 @@ from PyQt5.QtCore import pyqtSignal, QObject
 import numpy as np
 from sounddevice import OutputStream
 
-from friture.audiobackend import AudioBackend, SAMPLING_RATE
+from friture.audiobackend import (
+    AudioBackend,
+    FRAMES_PER_BUFFER,
+    OUTPUT_FRAMES_PER_BUFFER,
+    SAMPLING_RATE,
+)
+from friture.listen.playout import Playout
+from friture.listen.processor import BandProcessor
 from friture.ringbuffer import RingBuffer
 
 log = logging.getLogger(__name__)
 
 DEFAULT_HISTORY_LENGTH_S = 30
+
+# Room for a few output blocks. This queue is pulled, not pushed -- the
+# callback fills it on demand -- so it only has to absorb the ragged number of
+# samples a fractional resampler returns per chunk.
+PLAYOUT_CAPACITY = 8 * OUTPUT_FRAMES_PER_BUFFER
 
 class PlayState(Enum):
     STOPPED = 0
@@ -59,6 +71,18 @@ class Player(QObject):
         self.stream: Optional[OutputStream] = None
         self.play_offset = 0
         self.state = PlayState.STOPPED
+
+        # When band listening is on, playback is band-limited too, so what
+        # you hear from the history matches what you heard live.
+        self.band_processor: Optional[BandProcessor] = None
+
+        # The history is at the capture rate and the sound card is not, so
+        # nothing reaches the speakers without passing through here.
+        self.playout = Playout(PLAYOUT_CAPACITY)
+        self._block = np.zeros(OUTPUT_FRAMES_PER_BUFFER, dtype=np.float32)
+
+    def set_band_processor(self, band_processor: BandProcessor) -> None:
+        self.band_processor = band_processor
 
     def set_history_seconds(self, new_len: int) -> None:
         if new_len <= 0:
@@ -105,6 +129,13 @@ class Player(QObject):
             return
         self.state = PlayState.PLAYING
 
+        # A filter's tail belongs to one continuous stream; carrying the last
+        # playback's tail into this one would bleed it into the first
+        # milliseconds here. The resampler holds a tail for the same reason.
+        if self.band_processor is not None:
+            self.band_processor.reset()
+        self.playout.reset()
+
         log.info(f"Playing back {self.recorded_len} samples")
         if self.stream is None:
             for device in AudioBackend().output_devices:
@@ -146,40 +177,48 @@ class Player(QObject):
             log.info(status)
 
         out_channels = AudioBackend().get_device_outputchannels_count(self.device)
-        res = np.zeros((out_channels, samples))
-        available = self.buffer.offset - self.play_offset
-        to_copy = min(available, samples)
-        self.play_offset += to_copy
+
+        # Pull from the history until there is enough playback-rate audio for
+        # this block. The two rates differ by 125/24, so a fixed number of
+        # history samples per callback would not divide evenly -- the queue
+        # inside Playout is what absorbs that.
+        ran_out = False
+        while self.playout.available < samples:
+            remaining = self.buffer.offset - self.play_offset
+            if remaining <= 0:
+                ran_out = True
+                break
+            chunk = int(min(remaining, FRAMES_PER_BUFFER))
+            # data_indexed returns the samples ENDING at the index it is given
+            source = self.buffer.data_indexed(self.play_offset + chunk, chunk)
+            mono = source[0] if source.shape[0] == 1 else source.mean(axis=0)
+            if self.band_processor is not None and self.band_processor.active:
+                # Band listening collapses to mono: the band is one thing, and
+                # the first channel is the one the plots analyse, so it is the
+                # one whose peaks were clicked.
+                mono = self.band_processor.process(mono)
+            self.playout.push(mono)
+            self.play_offset += chunk
+
         self.playback_time_changed.emit(
             (self.play_offset - self.buffer.offset) / SAMPLING_RATE)
 
-        if available < samples and self.state == PlayState.PLAYING:
+        if ran_out and self.playout.available < samples and self.state == PlayState.PLAYING:
             log.info("Reached end of playback")
             self.state = PlayState.STOPPING
             self.stopping.emit()
 
-        in_channels = self.buffer.buffer.shape[0]
-        if in_channels == 1:
-            # Mono recording, duplicate to all output channels:
-            for i in range(out_channels):
-                res[i,0:to_copy] = self.buffer.data_indexed(
-                    self.play_offset, samples)[0,0:to_copy]
-        else:
-            # Stereo+ recording, leave higher out channels zero if present
-            copy_channels = min(out_channels, self.buffer.buffer.shape[0])
-            res[0:copy_channels,0:to_copy] = self.buffer.data_indexed(
-                self.play_offset, samples)[0:copy_channels,0:to_copy]
+        if self._block.shape[0] != samples:
+            self._block = np.zeros(samples, dtype=np.float32)
+        self.playout.pop_into(self._block)
 
         # Buffer is float in [-1, 1], output is int16, need to convert scales
         int16info = np.iinfo(np.int16)
         scale = min(abs(int16info.min), int16info.max)
-        res = scale * np.clip(res, -1.0, 1.0)
-        res = res.astype(np.int16)
+        mono_out = (scale * np.clip(self._block, -1.0, 1.0)).astype(np.int16)
 
-        # Buffer is channel-major, output is time-major
-        res = res.transpose()
-
-        out_data[:] = res
+        # out_data is time-major (frames, channels): one mono stream everywhere
+        out_data[:] = mono_out[:, np.newaxis]
 
 
     def on_stopping(self) -> None:

@@ -24,7 +24,10 @@ from typing import Any
 from friture.audiobackend import SAMPLING_RATE
 
 # Pitch tracker defaults:
-DEFAULT_FFT_SIZE = 4096
+# 32768, not 4096: pitch tracking looks for fundamentals down to 65 Hz, and
+# at 250 kHz a 4096-point transform has 61 Hz bins -- too coarse to tell one
+# note from the next. This restores the ~8 Hz resolution it had at 48 kHz.
+DEFAULT_FFT_SIZE = 32768
 DEFAULT_MIN_FREQ = 65
 DEFAULT_MAX_FREQ = 1047
 DEFAULT_DURATION = 10
