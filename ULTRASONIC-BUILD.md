@@ -3,6 +3,10 @@
 これは **Friture の改造版**であって、素の Friture ではありません。UltraMic 250K
 を 250 kHz で回して 0〜125 kHz を見る／聞くための専用ビルドです。
 
+作業は **`ultrasonic` ブランチ**にあります。`master` は改造前の Friture
+そのままなので、`master` を見て「機能が無い」と思わないこと。
+差分は `git diff master` で全部出ます。
+
 **普通のマイクは使えません。** `SAMPLING_RATE` が 250000 に固定してあるためです。
 通常の音声解析には Microsoft Store 版の Friture が別途入っているので、そちらを
 使ってください（AppUserModelID が別なので共存します）。
