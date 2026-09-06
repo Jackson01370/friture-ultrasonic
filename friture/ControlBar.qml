@@ -13,6 +13,8 @@ RowLayout {
 
     ComboBox {
         id: widgetSelector
+        objectName: "widget_selector"
+        // one entry per widget in friture/widgetdict.py, in the same order
         model: [
             "Scope",
             "FFT Spectrum",
@@ -21,7 +23,9 @@ RowLayout {
             "Generator",
             "Delay Estimator",
             "Long-time levels",
-            "Pitch Tracker"
+            "Pitch Tracker",
+            "Digital Decode",
+            "Band Survey"
         ]
         currentIndex: viewModel.currentIndex
         onCurrentIndexChanged: viewModel.currentIndex = currentIndex

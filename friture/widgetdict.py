@@ -25,6 +25,8 @@ from friture.generator import Generator_Widget
 from friture.delay_estimator import Delay_Estimator_Widget
 from friture.longlevels import LongLevelWidget
 from friture.pitch_tracker import PitchTrackerWidget
+from friture.digital_decode import DigitalDecode_Widget
+from friture.band_survey import BandSurvey_Widget
 
 widgets = [
     {'Id': 1, "Class": Scope_Widget, "Name": "Scope"},
@@ -35,6 +37,8 @@ widgets = [
     {'Id': 6, "Class": Delay_Estimator_Widget, "Name": "Delay Estimator"},
     {'Id': 7, "Class": LongLevelWidget, "Name": "Long-time levels"},
     {'Id': 8, "Class": PitchTrackerWidget, "Name": "Pitch Tracker"},
+    {'Id': 9, "Class": DigitalDecode_Widget, "Name": "Digital Decode"},
+    {'Id': 10, "Class": BandSurvey_Widget, "Name": "Band Survey"},
 ]
 
 

@@ -75,6 +75,7 @@ python_files = ["test_*.py"]
 packages=[
     "friture",
     "friture.listen",
+    "friture.demod",
     "friture.playback",
     "friture.plotting",
     "friture.generators",

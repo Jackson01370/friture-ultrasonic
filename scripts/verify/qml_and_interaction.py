@@ -87,6 +87,35 @@ band = GetListenBand()
 # 1. the control row
 load("listen/ListenControl.qml", {"viewModel": band})
 
+# 1b. the Digital Decode dock's view, with a readout already in it
+from friture.digital_decode_view_model import DigitalDecodeViewModel
+decode_vm = DigitalDecodeViewModel()
+decode_vm.mode_text = "FSK"
+decode_vm.band_text = "40.0 - 50.0 kHz"
+decode_vm.decode_text = "300 Bd, confidence 23 dB, eye 1.00, 525 symbols"
+decode_vm.locked = True
+decode_vm.bits = "01000010 10001010 10100011 10111110"
+decode_vm.set_symbols([0, 1, 1, -1, 0, 1], [1.0, 0.9, 0.6, 0.0, 1.0, 0.75])
+decode_view = load("DigitalDecode.qml", {"viewModel": decode_vm, "fixedFont": "Courier New"})
+
+# 1c. the Band Survey dock's view, with a couple of findings in it
+from friture.band_survey_view_model import BandSurveyViewModel
+survey_vm = BandSurveyViewModel()
+survey_vm.status_text = "2 lines standing at least 4 dB over its own neighbourhood, from 8.4 s of spectrum"
+survey_vm.range_text = "0.1 - 125.0 kHz"
+survey_vm.set_lines([
+    {"frequency": 25000.0, "frequency_text": "25.000 kHz", "excess": 23.3,
+     "excess_text": "+23.3 dB", "level_text": "19.1 dB", "steady": True, "steadiness_text": "steady"},
+    {"frequency": 16000.7, "frequency_text": "16.001 kHz", "excess": 14.9,
+     "excess_text": "+14.9 dB", "level_text": "6.2 dB", "steady": False,
+     "steadiness_text": "comes and goes (7 dB)"},
+])
+survey_vm.set_shape([
+    {"band_text": "20.0 - 26.0 kHz", "bar": 1.0, "detail_text": "median -3.4 dB   peak 25.6 dB at 25.000 kHz"},
+    {"band_text": "26.0 - 32.0 kHz", "bar": 0.4, "detail_text": "median -11.1 dB  peak 4.6 dB at 31.000 kHz"},
+])
+survey_view = load("BandSurvey.qml", {"viewModel": survey_vm, "fixedFont": "Courier New"})
+
 # 2. a plot with a vertical frequency axis, as the spectrogram has
 spectrogram_data = Scope_Data()
 spectrogram_data.vertical_axis.name = "Frequency (Hz)"
@@ -136,6 +165,40 @@ def check(label, condition, detail):
     global ok
     print("%-46s %s   %s" % (label, "ok " if condition else "FAIL", detail))
     ok = ok and condition
+
+
+# -- the Band Survey view binds to its model, and clicking a line tunes -----
+survey_lines = survey_view.rootObject().findChild(QObject, "survey_lines") if survey_view else None
+check("survey view lists the lines", survey_lines is not None and survey_lines.property("count") == 2,
+      "count=%s" % (survey_lines.property("count") if survey_lines is not None else "not found"))
+tuned = []
+survey_vm.tuneRequested.connect(lambda f: tuned.append(f))
+survey_vm.tune(25000.0)
+check("clicking a line asks for a tune", tuned == [25000.0], "%s" % tuned)
+
+# -- the Digital Decode view binds to its model ----------------------------
+strip = decode_view.rootObject().findChild(QObject, "symbol_strip") if decode_view else None
+check("decode view has the symbol strip", strip is not None and strip.property("visible"),
+      "" if strip is not None else "symbol_strip not found")
+
+
+def strip_symbols():
+    # a `property var` comes back as a QJSValue, not a list
+    value = strip.property("symbols")
+    return list(value.toVariant() if hasattr(value, "toVariant") else value)
+
+
+if strip is not None:
+    check("symbol strip sees the model's symbols", strip_symbols() == [0, 1, 1, -1, 0, 1],
+          "symbols=%s" % strip_symbols())
+    decode_vm.bits = ""
+    app.processEvents()
+    check("strip hides when there are no bits", not strip.property("visible"), "")
+    decode_vm.bits = "1111"
+    decode_vm.set_symbols([1, 1, 1, 1], [1.0, 1.0, 1.0, 1.0])
+    app.processEvents()
+    check("strip follows a new readout", strip.property("visible") and len(strip_symbols()) == 4,
+          "symbols=%s" % strip_symbols())
 
 
 band.click_center(10000.0)
