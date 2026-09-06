@@ -45,3 +45,9 @@ Notepad++
 
 # Macos
 .DS_Store
+# Serena (code-intelligence tool) working files
+.serena/
+
+# captures and analysis output from scripts/verify
+*.npz
+sandbox/*.png
