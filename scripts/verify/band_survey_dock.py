@@ -74,8 +74,11 @@ check("says it is still listening before it can answer", "listening" in vm.statu
 feed(widget, x)
 for _ in range(5):
     widget.canvasUpdate()
-lines = list(vm.lines)
+lines = [vm.lines.get(i) for i in range(vm.lines.count)]
 check("found lines", len(lines) >= 2, "%d lines" % len(lines))
+check("sorted by frequency, lowest first",
+      [row["frequency"] for row in lines] == sorted(row["frequency"] for row in lines),
+      "%s" % [round(row["frequency"] / 1000, 1) for row in lines])
 freqs = [round(row["frequency"] / 1000) for row in lines]
 check("found the steady line at 41 kHz", 41 in freqs, "%s" % freqs)
 check("found the intermittent line at 12 kHz", 12 in freqs, "%s" % freqs)
@@ -89,9 +92,31 @@ check("the shape readout shows the hump", len(vm.shape) > 4, "%d bands" % len(vm
 # -- clicking a line moves the shared Listen band -----------------------------
 band = GetListenBand()
 band.click_center(1000.0)
-vm.tune(41_000.0)
+row41 = next(r for r in lines if round(r["frequency"] / 1000) == 41)
+vm.tune(row41["frequency"], row41["width"])
 check("clicking a line points the Listen band at it",
       abs(band.get_centre_hz() - 41_000) < 1, "centre %s width %s" % (band.get_centre_hz(), band.get_width_hz()))
+check("the band is sized to the line, not a fixed 2 kHz",
+      400 <= band.get_width_hz() <= 4000 and abs(band.get_width_hz() - 2000) > 1,
+      "width %s Hz for a bare tone" % band.get_width_hz())
+
+# THE CLICK MUST LAND, from wherever the band happened to be. Both setters on
+# the shared band keep it inside the capture, so each can move the other's
+# value: measured before the fix, 8 kHz asked for at 120 kHz came back 2 kHz
+# wide (clamped against the OLD centre), and 124 kHz asked for 20 kHz wide
+# came back centred at 115 kHz.
+missed = []
+for start_c in (300, 25_000, 124_000):
+    for start_w in (400, 20_000):
+        for f in (120.0, 1_000.0, 25_000.0, 95_000.0, 124_500.0):
+            for wanted in (400.0, 8_000.0, 20_000.0):
+                band.click_center(float(start_c))
+                band.set_width_hz(start_w)
+                widget._on_tune(f, wanted)
+                if abs(band.get_centre_hz() - f) > 1:
+                    missed.append((start_c, start_w, f, wanted, band.get_centre_hz()))
+check("the click lands on the line from any starting band",
+      not missed, "%d of 90 combinations missed%s" % (len(missed), (": %s" % missed[:2]) if missed else ""))
 
 # -- the settings dialog drives it -------------------------------------------
 dlg = widget.settings_dialog
@@ -99,17 +124,17 @@ dlg.spin_from.setValue(30000)
 dlg.spin_to.setValue(60000)
 for _ in range(5):
     widget.canvasUpdate()
-freqs = [round(row["frequency"] / 1000) for row in vm.lines]
+freqs = [round(vm.lines.get(i)["frequency"] / 1000) for i in range(vm.lines.count)]
 check("the range setting narrows the search", 41 in freqs and 12 not in freqs, "%s" % freqs)
 check("the range is shown", "30.0" in vm.range_text, vm.range_text)
 dlg.spin_top.setValue(1)
 for _ in range(5):
     widget.canvasUpdate()
-check("the count setting is honoured", len(vm.lines) == 1, "%d lines" % len(vm.lines))
+check("the count setting is honoured", vm.lines.count == 1, "%d lines" % vm.lines.count)
 dlg.spin_excess.setValue(40.0)
 for _ in range(5):
     widget.canvasUpdate()
-check("a high threshold empties the list", len(vm.lines) == 0, "%d lines" % len(vm.lines))
+check("a high threshold empties the list", vm.lines.count == 0, "%d lines" % vm.lines.count)
 dlg.spin_excess.setValue(4.0)
 
 ini = Path(tempfile.mkdtemp()) / "survey.ini"
@@ -151,6 +176,37 @@ else:
     lst = view.rootObject().findChild(QObject, "survey_lines")
     check("the line list is populated in the view", lst is not None and lst.property("count") > 0,
           "count=%s" % (lst.property("count") if lst is not None else "no list"))
+
+    # THE CLICK TEST. The rows used to be a QVariantList, replaced whole on
+    # every refresh, so the delegate under the cursor was destroyed between
+    # press and release and most clicks did nothing. A row must survive a
+    # refresh that changes only its numbers.
+    first = view.rootObject().findChild(QObject, "survey_lines").childItems()
+    before_rows = [vm.lines.get(i)["frequency"] for i in range(vm.lines.count)]
+    resets = []
+    vm.lines.modelAboutToBeReset.connect(lambda: resets.append(1))
+    inserted = []
+    vm.lines.rowsInserted.connect(lambda *a: inserted.append(1))
+    removed = []
+    vm.lines.rowsRemoved.connect(lambda *a: removed.append(1))
+    for _ in range(30):
+        feed(widget, x[:BLOCK * 40])
+        widget.canvasUpdate()
+        app.processEvents()
+    after_rows = [vm.lines.get(i)["frequency"] for i in range(vm.lines.count)]
+    check("rows survive refreshes (no rebuild under the cursor)",
+          not resets and not inserted and not removed and before_rows == after_rows,
+          "%d resets, %d inserts, %d removes" % (len(resets), len(inserted), len(removed)))
+
+    # and the dock fits whatever height it is given
+    for h in (200, 300, 500):
+        view.resize(900, h)
+        app.processEvents()
+        root_item = view.rootObject()
+        content = root_item.childItems()[0]
+        fits = content.property("height") <= root_item.property("height") + 1
+        check("fits a %d px dock" % h, fits,
+              "content %.0f px in %.0f px" % (content.property("height"), root_item.property("height")))
 
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

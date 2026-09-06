@@ -49,10 +49,14 @@ DEFAULT_FROM_HZ = 100
 DEFAULT_TO_HZ = int(NYQUIST_HZ)
 DEFAULT_TOP = 12
 DEFAULT_MIN_EXCESS_DB = 4.0
-# How wide a band to hand to the other docks when a line is clicked. Wide
-# enough to hold the line's skirts and any modulation sidebands, narrow
-# enough that the decoder's baseband is not mostly empty.
-TUNE_WIDTH_HZ = 2000
+# The band handed to the other docks when a line is clicked is the line's
+# OWN measured extent (see SpectrumSurvey._extent), widened by this much so
+# the skirts are inside rather than on the edge, and then held between these
+# limits: narrower than the filter can resolve is pointless, and wider than
+# the decoder's baseband cannot be looked at anyway.
+TUNE_MARGIN = 1.6
+TUNE_MIN_WIDTH_HZ = 400
+TUNE_MAX_WIDTH_HZ = 20000
 
 HELP_TEXT = (
     "Every line is measured against the spectrum a few hundred hertz either side "
@@ -176,10 +180,14 @@ class BandSurvey_Widget(QObject):
                              ("%.0f s" % survey.seconds_held if survey.seconds_held < 90
                               else "%.1f min" % (survey.seconds_held / 60.0)),
                              survey.seconds_watched))
+        # The model sorts by frequency; what is IN it is still chosen by how
+        # far each line stands over its own floor.
         vm.set_lines([{
             "frequency": line.frequency_hz,
             "frequency_text": ("%.3f kHz" % (line.frequency_hz / 1e3) if line.frequency_hz >= 1000
                                else "%.1f Hz" % line.frequency_hz),
+            "width": self._tune_width(line),
+            "width_text": self._width_text(line),
             "excess": line.excess_db,
             "excess_text": "%+.1f dB" % line.excess_db,
             "level_text": "%.1f dB" % line.level_db,
@@ -200,10 +208,45 @@ class BandSurvey_Widget(QObject):
                 "detail_text": "median %6.1f dB   peak %6.1f dB at %8.3f kHz" % (median, peak, f_peak / 1e3),
             } for a, b, median, peak, f_peak in shape])
 
-    def _on_tune(self, frequency_hz: float) -> None:
-        """A line was clicked: move the shared Listen band onto it."""
-        width = max(MIN_WIDTH_HZ, TUNE_WIDTH_HZ)
-        self._band.set_width_hz(int(width))
+    @staticmethod
+    def _tune_width(line) -> float:
+        """The band to give this line: its own extent, widened and clamped."""
+        want = line.extent_hz * TUNE_MARGIN
+        return float(min(max(want, TUNE_MIN_WIDTH_HZ, MIN_WIDTH_HZ), TUNE_MAX_WIDTH_HZ))
+
+    @classmethod
+    def _width_text(cls, line) -> str:
+        """What the width column says: the signal's own extent, not the band."""
+        extent = line.extent_hz
+        if extent < 1.0:
+            return "a tone"
+        return "%.0f Hz" % extent if extent < 1000 else "%.1f kHz" % (extent / 1e3)
+
+    def _on_tune(self, frequency_hz: float, width_hz: float) -> None:
+        """A line was clicked: move the shared Listen band onto it.
+
+        ★ CENTRE, WIDTH, CENTRE AGAIN ★ The band keeps itself inside the
+        capture, so each setter can move the other value: asking for a
+        width while the band still sits at its OLD centre clamps the width
+        against that old position (measured: a 8 kHz band asked for at
+        120 kHz came back 2 kHz wide, because the band was still at 1 kHz
+        when the width was set), and asking for a centre while the band is
+        still its OLD width can clamp the centre. Setting the centre,
+        then the width, then the centre once more leaves both where they
+        were asked for, and costs one extra assignment.
+
+        A line near either END of the range cannot have a band wider than
+        twice its distance from that end without running past it, and the
+        band would then slide inward and miss the line -- measured: 124 kHz
+        asked for 20 kHz wide came back centred at 115 kHz. Its width is
+        reduced instead, which is the honest answer: that is all the room
+        there is on that side.
+        """
+        want = max(width_hz, MIN_WIDTH_HZ)
+        headroom = 2.0 * min(frequency_hz, NYQUIST_HZ - frequency_hz)
+        want = min(want, max(headroom, MIN_WIDTH_HZ))
+        self._band.set_centre_hz(int(frequency_hz))
+        self._band.set_width_hz(int(want))
         self._band.set_centre_hz(int(frequency_hz))
 
 

@@ -62,6 +62,16 @@ class SurveyLine:
     level_db: float         # absolute, in the same units as the spectrum
     spread_db: float        # 10th-to-90th percentile of its level over time
     n_windows: int
+    # How far the signal actually reaches either side, measured down to its
+    # own floor -- a bare tone is a few hertz wide, a modulated carrier
+    # carries its sidebands with it, and a listener wants the whole of
+    # whichever it is.
+    extent_lo_hz: float = 0.0
+    extent_hi_hz: float = 0.0
+
+    @property
+    def extent_hz(self) -> float:
+        return max(self.extent_hi_hz - self.extent_lo_hz, 0.0)
 
     @property
     def steady(self) -> bool:
@@ -94,6 +104,24 @@ class SpectrumSurvey:
     # is too much ten times a second, and the floor is smooth by
     # construction.
     FLOOR_STRIDE = 16
+    # How far above its own floor the signal is still counted as part of
+    # itself when its extent is measured. 3 dB is where a skirt has become
+    # the noise it is sitting on.
+    EXTENT_MARGIN_DB = 3.0
+    # ...and how far the walk may run before it is called a slope rather
+    # than a signal. A carrier with sidebands is a few kHz wide at most in
+    # anything this instrument will meet; beyond that the walk is climbing
+    # the microphone's own hump.
+    EXTENT_MAX_HZ = 4_000.0
+    # ...and how far below the peak still counts as the same signal. An AM
+    # carrier at 80% modulation puts its sidebands about 8 dB down; 20 dB
+    # leaves room for that and for a deeper one, without sweeping in
+    # whatever else is nearby.
+    EXTENT_RANGE_DB = 20.0
+    # How long a stretch of nothing the walk may cross before it decides
+    # the signal has ended. Wide enough for the gap between a carrier and
+    # its sidebands, narrower than the 1 kHz spacing of this room's spurs.
+    EXTENT_GAP_HZ = 500.0
 
     def __init__(self, fs: float, nfft: int = 1 << 16, history: int = 32) -> None:
         if fs <= 0:
@@ -229,10 +257,59 @@ class SpectrumSurvey:
             a, b = max(k - 1, 0), min(k + 2, self.freqs.size)
             per_window = 10.0 * np.log10(np.maximum(stack[:, a:b].sum(axis=1), 1e-30))
             spread = float(np.percentile(per_window, 90) - np.percentile(per_window, 10))
-            out.append(SurveyLine(f0, float(excess[k]), float(db[k]), spread, len(self._windows)))
+            lo_hz, hi_hz = self._extent(k, db, floor)
+            out.append(SurveyLine(f0, float(excess[k]), float(db[k]), spread,
+                                  len(self._windows), lo_hz, hi_hz))
             if len(out) >= top:
                 break
         return out
+
+    def _extent(self, k: int, db: np.ndarray, floor: np.ndarray) -> tuple[float, float]:
+        """How far the signal at bin ``k`` reaches, sidebands included.
+
+        NOT A CONTIGUOUS WALK OUT FROM THE PEAK. That was tried first and
+        stops at the carrier's own skirt: an AM carrier's sidebands sit at
+        +-the modulation rate with the floor in between, so a walk that
+        halts at the first bin to reach the floor reports the carrier alone
+        (measured: 11 Hz for a carrier whose sidebands were 400 Hz out).
+
+        Taking the outermost qualifying bin within a window was tried next
+        and is too greedy the other way: this room has spurs every 1 kHz, so
+        every line swallowed its neighbours and each one came back 3-7 kHz
+        wide.
+
+        What works is a walk that may cross a GAP, but only a short one. A
+        bin counts when it is EXTENT_MARGIN_DB over its own local floor --
+        which keeps the slope of a hump out, since the floor IS the hump
+        there -- and within EXTENT_RANGE_DB of the peak. The walk carries on
+        while the run of bins that do not count stays under EXTENT_GAP_HZ,
+        so an AM carrier keeps sidebands 400 Hz out and drops a neighbour
+        1 kHz away.
+        """
+        limit = max(1, int(self.EXTENT_MAX_HZ / self.bin_hz))
+        gap = max(1, int(self.EXTENT_GAP_HZ / self.bin_hz))
+        a, b = max(k - limit, 0), min(k + limit + 1, db.size)
+        counts = ((db[a:b] > floor[a:b] + self.EXTENT_MARGIN_DB)
+                  & (db[a:b] > db[k] - self.EXTENT_RANGE_DB))
+        here = k - a
+        lo = hi = here
+        run = 0
+        for i in range(here - 1, -1, -1):
+            if counts[i]:
+                lo, run = i, 0
+            else:
+                run += 1
+                if run > gap:
+                    break
+        run = 0
+        for i in range(here + 1, counts.size):
+            if counts[i]:
+                hi, run = i, 0
+            else:
+                run += 1
+                if run > gap:
+                    break
+        return float(self.freqs[a + lo]), float(self.freqs[a + hi])
 
     def band_shape(self, edges) -> list[tuple[float, float, float, float, float]]:
         """(lo, hi, median dB, peak dB, peak Hz) for each band, for the readout."""

@@ -104,11 +104,12 @@ survey_vm = BandSurveyViewModel()
 survey_vm.status_text = "2 lines standing at least 4 dB over its own neighbourhood, from 8.4 s of spectrum"
 survey_vm.range_text = "0.1 - 125.0 kHz"
 survey_vm.set_lines([
-    {"frequency": 25000.0, "frequency_text": "25.000 kHz", "excess": 23.3,
-     "excess_text": "+23.3 dB", "level_text": "19.1 dB", "steady": True, "steadiness_text": "steady"},
-    {"frequency": 16000.7, "frequency_text": "16.001 kHz", "excess": 14.9,
-     "excess_text": "+14.9 dB", "level_text": "6.2 dB", "steady": False,
-     "steadiness_text": "comes and goes (7 dB)"},
+    {"frequency": 25000.0, "frequency_text": "25.000 kHz", "excess": 23.3, "width": 400.0,
+     "width_text": "a tone", "excess_text": "+23.3 dB", "level_text": "19.1 dB",
+     "steady": True, "steadiness_text": "steady"},
+    {"frequency": 16000.7, "frequency_text": "16.001 kHz", "excess": 14.9, "width": 1800.0,
+     "width_text": "1.1 kHz", "excess_text": "+14.9 dB", "level_text": "6.2 dB",
+     "steady": False, "steadiness_text": "comes and goes (7 dB)"},
 ])
 survey_vm.set_shape([
     {"band_text": "20.0 - 26.0 kHz", "bar": 1.0, "detail_text": "median -3.4 dB   peak 25.6 dB at 25.000 kHz"},
@@ -172,9 +173,12 @@ survey_lines = survey_view.rootObject().findChild(QObject, "survey_lines") if su
 check("survey view lists the lines", survey_lines is not None and survey_lines.property("count") == 2,
       "count=%s" % (survey_lines.property("count") if survey_lines is not None else "not found"))
 tuned = []
-survey_vm.tuneRequested.connect(lambda f: tuned.append(f))
-survey_vm.tune(25000.0)
-check("clicking a line asks for a tune", tuned == [25000.0], "%s" % tuned)
+survey_vm.tuneRequested.connect(lambda f, w: tuned.append((f, w)))
+survey_vm.tune(25000.0, 640.0)
+check("clicking a line asks for a tune, with a width", tuned == [(25000.0, 640.0)], "%s" % tuned)
+check("the survey list is sorted by frequency",
+      [survey_vm.lines.get(i)["frequency"] for i in range(survey_vm.lines.count)] == [16000.7, 25000.0],
+      "%s" % [survey_vm.lines.get(i)["frequency_text"] for i in range(survey_vm.lines.count)])
 
 # -- the Digital Decode view binds to its model ----------------------------
 strip = decode_view.rootObject().findChild(QObject, "symbol_strip") if decode_view else None

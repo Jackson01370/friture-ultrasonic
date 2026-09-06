@@ -184,6 +184,24 @@ class SurveyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SpectrumSurvey(FS, history=1)
 
+    def test_extent_measures_the_signal_not_the_slope(self):
+        """A bare tone comes back a few hertz wide; one carrying sidebands
+        comes back with them; a hump on its own is not a line at all."""
+        n = int(3.0 * FS)
+        t = np.arange(n) / FS
+        bare = noise(n, seed=20) + 0.02 * np.cos(2 * np.pi * 30_000.0 * t)
+        # the same carrier, amplitude-modulated at 400 Hz: sidebands at +-400
+        modulated = noise(n, seed=20) + 0.02 * (1.0 + 0.8 * np.cos(2 * np.pi * 400.0 * t)) \
+            * np.cos(2 * np.pi * 60_000.0 * t)
+        s = SpectrumSurvey(FS)
+        feed(s, bare + modulated)
+        found = {round(line.frequency_hz / 1000): line for line in s.lines(1_000.0, 120_000.0)}
+        self.assertIn(30, found)
+        self.assertIn(60, found)
+        self.assertLess(found[30].extent_hz, 200.0, "a bare tone should be narrow")
+        self.assertGreater(found[60].extent_hz, 700.0, "sidebands at +-400 Hz should be inside")
+        self.assertLess(found[60].extent_hz, 3000.0, "and it should not run away up the slope")
+
     def test_survey_line_wording(self):
         line = SurveyLine(25_000.0, 21.3, 5.0, 1.0, 32)
         self.assertTrue(line.steady)
