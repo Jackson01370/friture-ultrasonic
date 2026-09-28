@@ -88,7 +88,7 @@ detector = VoiceDetector(ANALYSIS_FS)
 chunks = []
 
 
-def on_data(floatdata):
+def on_data(floatdata, *_):
     chunks.append(np.array(floatdata[0, :], dtype=np.float32))
 
 
@@ -103,6 +103,9 @@ def capture(duration, signal=None):
         sd.play(signal.astype(np.float32), PLAY_FS, blocking=False)
     t_end = time.time() + duration
     while time.time() < t_end:
+        # the backend is PULLED: nothing arrives unless it is asked for,
+        # which is what the display timer does inside the app
+        backend.fetchAudioData()
         app.processEvents()
         time.sleep(0.002)
     sd.stop()
@@ -118,43 +121,65 @@ def analyse(x):
 
 # the speaker only wakes up properly after something has been sent to it
 sd.play(np.zeros(PLAY_FS // 2, dtype=np.float32), PLAY_FS, blocking=True)
+capture(1.0)                      # drain whatever queued up while starting
 
-print("%-22s %-11s %-9s %s" % ("run", "level dBFS", "score", "what the detector says"))
-silence = capture(seconds)
-ev, silence_level = analyse(silence)
-if ev is None:
-    print("FAIL: captured nothing")
-    raise SystemExit(1)
-floor = ev.score
-lvl = silence_level
-print("%-22s %-11.1f %-9.2f %s" % ("the room alone", lvl, ev.score, ev.describe()))
-if save_dir:
-    np.savez_compressed(save_dir / "silence.npz", x=silence, fs=float(SAMPLING_RATE))
-
-results = []
+# CAPTURE EVERYTHING FIRST, ANALYSE AFTERWARDS. Scoring between runs let the
+# ring buffer fall a second behind and the next run came back empty.
+SEG = 5.0                         # seconds per scored segment
+print("recording %.0f s of the room alone, then %d playback levels ..."
+      % (2 * seconds, len(levels)), flush=True)
+silence = capture(2 * seconds)
+runs = []
 for db in levels:
     take = play[:int(seconds * PLAY_FS)]
-    rec = capture(seconds, take * (10.0 ** (db / 20.0)))
-    ev, lvl = analyse(rec)
-    results.append((db, ev.score, lvl))
-    verdict = "FOUND" if ev.score > floor * 1.5 else "not found"
-    print("%-22s %-11.1f %-9.2f %-10s %s"
-          % ("speech at %+.0f dB" % db, lvl, ev.score, verdict,
-             "pitch %.0f Hz" % ev.median_f0_hz if np.isfinite(ev.median_f0_hz) else ""))
-    if save_dir:
+    runs.append((db, capture(seconds, take * (10.0 ** (db / 20.0)))))
+backend.close()
+if silence.size < SAMPLING_RATE or any(r.size < SAMPLING_RATE for _, r in runs):
+    print("FAIL: a run captured nothing")
+    raise SystemExit(1)
+if save_dir:
+    np.savez_compressed(save_dir / "silence.npz", x=silence, fs=float(SAMPLING_RATE))
+    for db, rec in runs:
         np.savez_compressed(save_dir / ("speech_%+03d.npz" % db), x=rec, fs=float(SAMPLING_RATE))
 
-backend.close()
-print("\nthe room alone scored %.2f; a run counts as found above %.2f" % (floor, floor * 1.5))
-found = [db for db, sc, _ in results if sc > floor * 1.5]
-if found:
-    print("quietest playback still found: %+.0f dB, captured at %.1f dBFS"
-          % (min(found), [l for d, s, l in results if d == min(found)][0]))
-    quietest = [l for d, s, l in results if d == min(found)][0]
-    print("the room alone sat at %.1f dBFS, the capture at %.1f dBFS"
-          % (silence_level, quietest))
-else:
-    print("nothing was found at any level -- check the speakers are on and unmuted")
-ok = results and max(sc for _, sc, _ in results) > floor
-print("\n%s" % ("OK" if ok else "FAIL: silence scored as high as the loudest speech"))
+
+def segments(x):
+    band = resample_poly(x.astype(np.float64), 16, 250)
+    n = int(SEG * ANALYSIS_FS)
+    return [band[i:i + n] for i in range(0, band.size - n + 1, n)]
+
+
+def power(x):
+    return float(np.mean(resample_poly(x.astype(np.float64), 16, 250) ** 2))
+
+
+# the null: every 5 s of silence, and the threshold is the worst of them --
+# a run segment counts only if it beats everything the room did on its own
+null = np.array([detector.score(s).score for s in segments(silence)])
+threshold = float(null.max())
+p_room = power(silence)
+print()
+print("the room alone: %d segments of %.0f s, scores %.2f .. %.2f  (threshold = the worst, %.2f)"
+      % (null.size, SEG, null.min(), null.max(), threshold))
+print()
+print("%-16s %-13s %-17s %s" % ("playback", "SNR in air", "segments found", "pitch it heard"))
+results = []
+for db, rec in runs:
+    evs = [detector.score(s) for s in segments(rec)]
+    hits = sum(e.score > threshold for e in evs)
+    ratio = power(rec) / p_room - 1.0
+    snr = 10 * np.log10(ratio) if ratio > 1e-3 else float("-inf")
+    f0 = [e.median_f0_hz for e in evs if e.score > threshold and np.isfinite(e.median_f0_hz)]
+    results.append((db, snr, hits, len(evs)))
+    print("%-16s %-13s %2d of %-2d  %4.0f%%   %s"
+          % ("%+.0f dB" % db, "%+.1f dB" % snr if np.isfinite(snr) else "unmeasurable",
+             hits, len(evs), 100.0 * hits / len(evs),
+             "%.0f Hz" % np.median(f0) if f0 else "-"))
+
+print()
+print("SNR in air = the speech band during playback over the same band in silence,")
+print("so it is on the same axis as voice_sensitivity.py (the synthetic test).")
+ok = max(h / n for _, _, h, n in results) >= 0.8
+print()
+print("OK" if ok else "FAIL: even the loudest playback was not found")
 raise SystemExit(0 if ok else 1)

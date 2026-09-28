@@ -345,13 +345,36 @@ HMM の時間構造は対照より 5 dB 分の価値があった（−5 dB で 9
   ピッチ変動量でも分離できなかった（部屋 0.615 / ブザー 0.128〜0.683 / 音声 0.317〜0.382 オクターブ）。
 - 一方、**定常トーン・脈動トーン・うなり・電源ハム・和音は誤検出しない**。
   白色化が除去する。`test_speech_detector.py` が 5 種すべてを固定している。
-- **空気経由の検証は未実施**（UltraMic が外れているため）。
-  `scriptserifyoice_over_the_air.py` を用意してあるが実行していない。
+### 空気経由の実測（2026-09-28）
+
+PC スピーカー → 部屋 → UltraMic で日本語音声を 7 段階の音量で再生。閾値は同じ部屋の
+無音 45 秒（5 秒 × 9 区間）の**最悪値**。SNR は再生中と無音時の音声帯域パワーの実測差。
+
+| 実測 SNR | 5 秒区間の検出 |
+|---|---|
+| +5.3 dB | 5 / 5 |
+| +2.5 dB | 5 / 5 |
+| −1.1 dB | 5 / 5 |
+| −3.1 dB | 4 / 5 |
+| −8.7 dB | 0 / 5 |
+
+合成試験（0 dB で 100%、−5 dB で 69〜97%、−10 dB で 16%）と数 dB 以内で一致した。
+
+分かったこと:
+
+- **スピーカーが線形でない**。再生を 10 dB 下げても空気中では 2.8〜3.6 dB しか下がらない
+  （Windows 側の音響処理か増幅器と推測、未確認）。だから SNR は再生の減衰量からは出せず、
+  実測の音響パワーで出す。
+- **最後の回に外部の音が入った**。−40 dB の回の 25 秒間ずっと部屋が +9.5 dB 大きくなり、
+  再生音声との相関はなかった。検出器はこれを声らしいと判定した（ピッチ 246 Hz、スコア 13.25 —
+  0 dB 再生の 11.5 より高い）。ブザーと声を区別できない制約があるので、正体は聞いて確かめる。
+- **ハーネスの欠陥 2 件**: バックエンドはプル型で `fetchAudioData()` を呼ばないと何も来ない。
+  回の合間に解析するとリングバッファが 1 秒遅れ、次の回が空になる。→ 全部録ってから解析する。
 
 ```
 python -m unittest friture.test.test_speech_detector   # 14 件
-python scriptserifyoice_sensitivity.py CAPTURE.npz SPEECH.wav   # 感度曲線
-python scriptserifyoice_over_the_air.py SPEECH.wav             # ★ 実機・未実行
+python scripts\verify\voice_sensitivity.py CAPTURE.npz SPEECH.wav   # 感度曲線（合成）
+python scripts\verify\voice_over_the_air.py SPEECH.wav --save DIR   # ★ 実機
 ```
 
 ## 実測値（判断の根拠）
