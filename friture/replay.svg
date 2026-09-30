@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Replay: a clock face with an arrow turning back. Drawn for Friture's
+     replay button; the icons in the resource file had nothing meaning
+     "look at what was recorded", and the nearest one read as a warning. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- the arrow's arc: most of a circle, open at the upper left -->
+  <path d="M 11.5 14 A 16 16 0 1 1 8 24"
+        fill="none" stroke="#3465a4" stroke-width="4" stroke-linecap="round"/>
+  <!-- the arrowhead, pointing back along the arc -->
+  <path d="M 4 11 L 13 11 L 12 20 Z" fill="#3465a4"/>
+  <!-- the clock hands -->
+  <path d="M 24 15 L 24 24 L 31 28"
+        fill="none" stroke="#555753" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="24" cy="24" r="2" fill="#555753"/>
+</svg>

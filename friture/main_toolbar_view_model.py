@@ -26,6 +26,7 @@ class MainToolbarViewModel(QtCore.QObject):
     new_dock_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
     about_clicked = pyqtSignal()
+    replay_clicked = pyqtSignal()
 
     # the continuous recorder, for the indicator at the end of the toolbar
     recorder_text_changed = pyqtSignal(str)
@@ -86,3 +87,7 @@ class MainToolbarViewModel(QtCore.QObject):
     @pyqtSlot()
     def about(self) -> None:
         self.about_clicked.emit()
+
+    @pyqtSlot()
+    def replay(self) -> None:
+        self.replay_clicked.emit()

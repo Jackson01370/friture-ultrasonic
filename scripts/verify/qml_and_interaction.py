@@ -117,6 +117,19 @@ survey_vm.set_shape([
 ])
 survey_view = load("BandSurvey.qml", {"viewModel": survey_vm, "fixedFont": "Courier New"})
 
+# 1d. the replay bar, as it looks mid-replay with a gap in the recording
+from friture.replay_view_model import ReplayViewModel
+replay_vm = ReplayViewModel()
+replay_vm.active = True
+replay_vm.playing = True
+replay_vm.position_text = "2026-09-30 15:46:48.5"
+replay_vm.start_text = "2026-09-30 15:46:10.5"
+replay_vm.end_text = "2026-09-30 17:46:52.5"
+replay_vm.status_text = "Replaying 2026-09-30_15-46-10.592.wav."
+replay_vm.fraction = 0.25
+replay_vm.set_ranges([[0.0, 0.4], [0.6, 1.0]])
+replay_view = load("ReplayBar.qml", {"viewModel": replay_vm, "fixedFont": "Courier New"})
+
 # 2. a plot with a vertical frequency axis, as the spectrogram has
 spectrogram_data = Scope_Data()
 spectrogram_data.vertical_axis.name = "Frequency (Hz)"
@@ -167,6 +180,36 @@ def check(label, condition, detail):
     print("%-46s %s   %s" % (label, "ok " if condition else "FAIL", detail))
     ok = ok and condition
 
+
+# -- the replay bar shows the model and sends its requests back --------------
+if replay_view is not None:
+    replay_view.resize(1200, 90)
+    replay_view.show()
+    app.processEvents()
+    rroot = replay_view.rootObject()
+    pos_label = rroot.findChild(QObject, "replay_position")
+    check("replay bar shows the recording's own time",
+          pos_label is not None and pos_label.property("text") == "2026-09-30 15:46:48.5",
+          pos_label.property("text") if pos_label is not None else "not found")
+    slider = rroot.findChild(QObject, "replay_slider")
+    check("replay slider follows the playing position",
+          slider is not None and abs(slider.property("value") - 0.25) < 1e-6,
+          "value=%s" % (slider.property("value") if slider is not None else "not found"))
+    replay_vm.fraction = 0.5
+    app.processEvents()
+    check("...and moves when the position does", abs(slider.property("value") - 0.5) < 1e-6,
+          "value=%s" % slider.property("value"))
+    asked = []
+    replay_vm.seek_requested.connect(lambda f: asked.append(("seek", f)))
+    replay_vm.play_pause_requested.connect(lambda: asked.append(("play_pause",)))
+    replay_vm.seek(0.75)
+    replay_vm.play_pause()
+    check("replay bar requests reach the controller", asked == [("seek", 0.75), ("play_pause",)], "%s" % asked)
+    replay_vm.active = False
+    app.processEvents()
+    check("replay bar hides when not replaying", not rroot.property("visible"), "")
+else:
+    check("ReplayBar.qml loads", False, "")
 
 # -- the Band Survey view binds to its model, and clicking a line tunes -----
 survey_lines = survey_view.rootObject().findChild(QObject, "survey_lines") if survey_view else None

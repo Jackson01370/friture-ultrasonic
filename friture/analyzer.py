@@ -48,6 +48,8 @@ from friture.audiobuffer import AudioBuffer  # audio ring buffer class
 from friture.audiobackend import AudioBackend, FRAMES_PER_BUFFER, SAMPLING_RATE  # audio backend class
 from friture.recording.recorder import ContinuousRecorder
 from friture.recording.store import BYTES_PER_GB
+from friture.replay_control import ReplayController
+from friture.replay_view_model import ReplayViewModel
 from friture.dockmanager import DockManager
 from friture.tilelayout import TileLayout
 from friture.level_view_model import LevelViewModel
@@ -121,6 +123,7 @@ class Friture(QMainWindow, ):
         qmlRegisterType(ListenBandViewModel, 'Friture', 1, 0, 'ListenBandViewModel')
         qmlRegisterType(MainWindowViewModel, 'Friture', 1, 0, 'MainWindowViewModel')
         qmlRegisterType(MainToolbarViewModel, 'Friture', 1, 0, 'MainToolbarViewModel')
+        qmlRegisterType(ReplayViewModel, 'Friture', 1, 0, 'ReplayViewModel')
         qmlRegisterType(Axis, 'Friture', 1, 0, 'Axis')
         qmlRegisterType(Curve, 'Friture', 1, 0, 'Curve')
         qmlRegisterType(FilledCurve, 'Friture', 1, 0, 'FilledCurve')
@@ -225,6 +228,16 @@ class Friture(QMainWindow, ):
         self.settings_dialog.continuous_recording_changed.connect(self.recorder.configure)
         self.slow_timer.timeout.connect(self.update_recorder_indicator)
 
+        # Replay: the display fed from a recording, the microphone still
+        # captured and recorded underneath.
+        self.replay = ReplayController(
+            self, self._main_window_view_model.replay_view_model,
+            get_folder=lambda: self.settings_dialog.lineEdit_recordingDir.text(),
+            restart_docks=self.dockmanager.restart)
+        self._main_window_view_model.toolbar_view_model.replay_clicked.connect(self.replay.toggle)
+        self.replay.mode_changed.connect(self._replay_mode_changed)
+        self.replay.playing_changed.connect(self._replay_playing_changed)
+
         # restore the settings and widgets geometries
         self.restoreAppState()
 
@@ -292,6 +305,7 @@ class Friture(QMainWindow, ):
 
     # event handler
     def closeEvent(self, event):
+        self.replay.leave()
         self.listen_monitor.set_running(False)
         # the recorder first: stop feeding it, let it write out what is
         # queued and close its file, then give the device back
@@ -377,7 +391,30 @@ class Friture(QMainWindow, ):
         settings.endGroup()
 
     # slot
+    def _replay_mode_changed(self, replaying: bool) -> None:
+        vm = self._main_window_view_model.toolbar_view_model
+        if replaying:
+            # the display timer is what pulls the replay's blocks; the
+            # microphone is left exactly as it was
+            if not self.display_timer.isActive():
+                self.display_timer.start()
+            vm.recording = self.replay.playing
+        else:
+            live = AudioBackend().capturing
+            if not live and self.display_timer.isActive():
+                self.display_timer.stop()
+            vm.recording = live
+
+    def _replay_playing_changed(self, playing: bool) -> None:
+        self._main_window_view_model.toolbar_view_model.recording = playing
+
     def timer_toggle(self):
+        # While replaying, Stop/Start pauses the REPLAY. Pausing the capture
+        # would stop the continuous recording of the room, which must go on
+        # while an older recording is being looked at.
+        if self.replay.active:
+            self.replay.play_pause()
+            return
         if self.display_timer.isActive():
             self.logger.info("Timer stop")
             self.display_timer.stop()

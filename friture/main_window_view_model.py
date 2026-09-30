@@ -24,6 +24,7 @@ from friture.level_view_model import LevelViewModel
 from friture.listen.listen_band_view_model import GetListenBand, ListenBandViewModel
 from friture.main_toolbar_view_model import MainToolbarViewModel
 from friture.playback.playback_control_view_model import PlaybackControlViewModel
+from friture.replay_view_model import ReplayViewModel
 
 class MainWindowViewModel(QtCore.QObject):
     playback_control_enabled_changed = pyqtSignal(bool)
@@ -34,7 +35,12 @@ class MainWindowViewModel(QtCore.QObject):
         self._toolbar_view_model = MainToolbarViewModel(self)
         self._level_view_model = LevelViewModel(self)
         self._playback_control_view_model = PlaybackControlViewModel(self)
+        self._replay_view_model = ReplayViewModel(self)
         self._playback_control_enabled = False
+
+    @pyqtProperty(ReplayViewModel, constant=True) # type: ignore
+    def replay_view_model(self):
+        return self._replay_view_model
 
     @pyqtProperty(MainToolbarViewModel, constant=True) # type: ignore
     def toolbar_view_model(self):

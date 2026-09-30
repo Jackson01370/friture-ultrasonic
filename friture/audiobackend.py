@@ -117,6 +117,9 @@ class __AudioBackend(QtCore.QObject):
 
     underflow = QtCore.pyqtSignal()
     new_data_available = QtCore.pyqtSignal(ndarray, float, bool)
+    # The displayed stream broke: a replay seeked or jumped a gap in the
+    # recording. Whatever averages or tracks across blocks should start over.
+    display_discontinuity = QtCore.pyqtSignal()
 
     def __init__(self):
         QtCore.QObject.__init__(self)
@@ -167,6 +170,10 @@ class __AudioBackend(QtCore.QObject):
         # to keep rtmixer's action alive, but what is read is dropped: it
         # belongs to no run anyone asked for.
         self._running = False
+        # When set, the DISPLAY is fed from this instead of the microphone --
+        # a friture.recording.replay.ReplaySource. The raw sinks, and so the
+        # continuous recorder, keep getting the microphone regardless.
+        self._display_source = None
 
         # we will try to open all the input devices until one
         # works, starting by the default input device
@@ -739,6 +746,47 @@ class __AudioBackend(QtCore.QObject):
     def get_device_outputchannels_count(self, device):
         return device['max_output_channels']
 
+    def set_display_source(self, source):
+        """Feed the display from source (a ReplaySource), or from the microphone if None."""
+        with self._lock:
+            self._display_source = source
+            self._display_queue.clear()
+
+    @property
+    def display_source(self):
+        return self._display_source
+
+    @property
+    def capturing(self) -> bool:
+        """Between restart() and pause(): the microphone is being captured."""
+        return self._running
+
+    def _fetch_from_source(self, source):
+        """The replay branch of fetchAudioData. GUI thread."""
+        with self._lock:
+            # the microphone goes on being captured and recorded; only its
+            # display copy is not wanted while a recording is shown
+            self._display_queue.clear()
+        got = source.fetch()
+        if not got:
+            return
+        # Stamp the blocks on the capture's stream clock, as live blocks are:
+        # the spectrogram scrolls by comparing block times with that clock.
+        # The last block due is "now", the ones before it a block apart at
+        # the playing speed.
+        now = self.get_stream_time() if self.stream is not None else time.monotonic()
+        step = FRAMES_PER_BUFFER / SAMPLING_RATE / max(source.speed, 1e-6)
+        n = len(got)
+        for k, (block, jumped) in enumerate(got):
+            if jumped:
+                self.display_discontinuity.emit()
+            channel = min(self.get_current_first_channel(), block.shape[1] - 1)
+            floatdata = (block[:, channel].astype(float64) / 32768.0).reshape(1, -1)
+            if self.duo_input and block.shape[1] > 1:
+                channel_2 = min(self.get_current_second_channel(), block.shape[1] - 1)
+                floatdata = vstack((floatdata[0], block[:, channel_2].astype(float64) / 32768.0))
+            self.new_data_available.emit(floatdata, now - (n - 1 - k) * step, False)
+
     def fetchAudioData(self):
         """Hand the blocks the capture thread has queued to the display.
 
@@ -746,6 +794,10 @@ class __AudioBackend(QtCore.QObject):
         the ring buffer -- see CAPTURE_POLL_S -- so however late it runs,
         the capture carries on and only the display falls behind.
         """
+        source = self._display_source
+        if source is not None:
+            self._fetch_from_source(source)
+            return
         while True:
             with self._lock:
                 if not self._display_queue:

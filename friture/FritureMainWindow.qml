@@ -60,6 +60,24 @@ Rectangle { // eventually move to ApplicationWindow
                     }
                 }
                 ToolButton {
+                    id: replayButton
+                    objectName: "replay_button"
+                    checkable: true
+                    checked: mainWindow.main_window_view_model.replay_view_model.active
+                    // beside this file, not in the resource file: nothing
+                    // there means "replay", and log.svg reads as a warning
+                    icon.source: Qt.resolvedUrl("replay.svg")
+                    icon.color: "transparent"
+                    text: qsTr("Replay")
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Look at the continuous recordings instead of the room; the room goes on being recorded")
+                    icon.height: 32
+                    icon.width: 32
+                    onClicked: {
+                        mainWindow.main_window_view_model.toolbar_view_model.replay()
+                    }
+                }
+                ToolButton {
                     id: aboutButton
                     icon.source: "qrc:/images-src/window-icon.svg"
                     text: qsTr("About Friture")
@@ -98,6 +116,12 @@ Rectangle { // eventually move to ApplicationWindow
                     }
                 }
             }
+        }
+
+        ReplayBar {
+            Layout.fillWidth: true
+            viewModel: mainWindow.main_window_view_model.replay_view_model
+            fixedFont: mainWindow.fixedFont
         }
 
         MainWindow {

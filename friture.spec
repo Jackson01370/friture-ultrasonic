@@ -82,7 +82,7 @@ if platform.system() == "Windows":
 a = Analysis(['main.py'],
              pathex=pathex,
              binaries=[],
-             datas= [('friture/*.qml', '.' ), ('friture/playback/*.qml', 'playback' ), ('friture/listen/*.qml', 'listen' ), ('friture/generators/*.qml', 'generators' ), ('friture/*.js', '.' )],
+             datas= [('friture/*.qml', '.' ), ('friture/playback/*.qml', 'playback' ), ('friture/listen/*.qml', 'listen' ), ('friture/generators/*.qml', 'generators' ), ('friture/*.js', '.' ), ('friture/*.svg', '.' )],
              hiddenimports=[],
              hookspath=["installer/pyinstaller-hooks"], # our custom hooks for python-sounddevice
              runtime_hooks=[],
