@@ -86,6 +86,7 @@ class ReplayController(QtCore.QObject):
         vm.step_requested.connect(self.step)
         vm.speed_requested.connect(self.set_speed)
         vm.latest_requested.connect(self.latest)
+        vm.protect_requested.connect(self.toggle_protect)
         AudioBackend().display_discontinuity.connect(self._on_jump)
 
     @property
@@ -182,6 +183,22 @@ class ReplayController(QtCore.QObject):
             self.seek(end - FOLLOWING_S)
             self.source.play()
 
+    def toggle_protect(self) -> None:
+        """Keep (or release) the file being replayed."""
+        src = self.source
+        if src is None or src.timeline.empty:
+            return
+        from friture.recording.session import GetRecordingSession
+        from friture.recording.store import SegmentStore
+        entry = src.timeline.entries[src._i]
+        on = not entry.info.protected
+        SegmentStore(src.timeline.folder).set_protected([entry.info.wav], on)
+        recorder = GetRecordingSession().recorder
+        if recorder is not None:
+            recorder.set_protected(entry.info.wav, on)
+        entry.info.protected = on
+        self._update_view()
+
     def _on_jump(self) -> None:
         # a gap in the recording was jumped during playback
         self._restart_docks()
@@ -202,6 +219,7 @@ class ReplayController(QtCore.QObject):
         vm.end_text = _clock_text(end)
         vm.fraction = (pos - start) / span
         vm.set_ranges([((a - start) / span, (b - start) / span) for a, b in src.timeline.ranges()])
+        vm.current_protected = bool(src.timeline.entries[src._i].info.protected)
         last = src.timeline.entries[-1]
         if src.at_end:
             status = "End of the recordings."

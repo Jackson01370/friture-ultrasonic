@@ -27,6 +27,7 @@ from friture.longlevels import LongLevelWidget
 from friture.pitch_tracker import PitchTrackerWidget
 from friture.digital_decode import DigitalDecode_Widget
 from friture.band_survey import BandSurvey_Widget
+from friture.recording_events import RecordingEvents_Widget
 
 widgets = [
     {'Id': 1, "Class": Scope_Widget, "Name": "Scope"},
@@ -39,6 +40,7 @@ widgets = [
     {'Id': 8, "Class": PitchTrackerWidget, "Name": "Pitch Tracker"},
     {'Id': 9, "Class": DigitalDecode_Widget, "Name": "Digital Decode"},
     {'Id': 10, "Class": BandSurvey_Widget, "Name": "Band Survey"},
+    {'Id': 11, "Class": RecordingEvents_Widget, "Name": "Recording Events"},
 ]
 
 

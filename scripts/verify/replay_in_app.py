@@ -111,13 +111,8 @@ C = write(T0 + 90.0, "synthetic-2", 0,
 print("wrote a synthetic recording: A %s, B %s, 30 s gap, C %s" % (A.wav, B.wav, C.wav))
 
 # -- 2. the application ------------------------------------------------------------------
-s = QSettings("Friture", "Friture")
-s.beginGroup("AudioBackend")
-s.setValue("continuousRecording", True)
-s.setValue("recordingDir", str(folder))
-s.setValue("recordingCapGB", 50)
-s.endGroup()
-s.sync()
+# this run only, never saved into the user's settings
+os.environ["FRITURE_RECORDING_DIR"] = str(folder)
 
 app = QApplication(sys.argv)
 from friture.analyzer import Friture

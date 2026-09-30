@@ -158,6 +158,11 @@ class WavSegmentWriter:
         self.path = self.folder / info.wav
         self._f = open(self.path, "wb", buffering=1 << 20)
         self._f.write(_header(info.fs, info.channels, 0))
+        # To the OS at once: a process that ended before the first FLUSH_S
+        # left a 0-byte file -- not even a header -- which no repair could
+        # read. Measured: a verification script that never closed its window
+        # left five of them in the user's recording folder.
+        self._f.flush()
         self._data_bytes = 0
         self._last_refresh = time.monotonic()
         self._last_flush = self._last_refresh
@@ -210,6 +215,14 @@ class WavSegmentWriter:
         nominal = (info.run_index + info.n_frames - i0) / info.fs
         if nominal > 300.0:
             info.clock_drift_ppm = 1e6 * (span - nominal) / nominal
+        # The user may have protected this segment while it was being
+        # written, by writing its sidecar. Saving the in-memory copy over it
+        # would silently undo that, so a protection on disk is kept.
+        try:
+            on_disk = SegmentInfo.load(self.folder / (Path(info.wav).stem + ".json"))
+            info.protected = info.protected or on_disk.protected
+        except Exception:
+            pass
         # False if Windows kept the sidecar locked past every retry: the
         # closed state is then in <stem>.json.tmp, and the store adopts it
         # on the next start (SegmentStore.repair_interrupted)

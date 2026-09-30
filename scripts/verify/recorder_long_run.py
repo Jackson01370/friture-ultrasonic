@@ -57,15 +57,10 @@ stall_at = float(option("--stall-at", 5))
 stop_at = float(option("--stop-at", 13))
 folder.mkdir(parents=True, exist_ok=True)
 
-# the folder goes into the settings BEFORE the window exists, so not one
-# block goes to the user's own recording folder during the test
-s = QSettings("Friture", "Friture")
-s.beginGroup("AudioBackend")
-s.setValue("continuousRecording", True)
-s.setValue("recordingDir", str(folder))
-s.setValue("recordingCapGB", 50)
-s.endGroup()
-s.sync()
+# the folder is given to the application for this run only, BEFORE the
+# window exists, so not one block goes to the user's own recording folder
+# and nothing about it is saved into the user's settings
+os.environ["FRITURE_RECORDING_DIR"] = str(folder)
 
 app = QApplication(sys.argv)
 from friture.analyzer import Friture

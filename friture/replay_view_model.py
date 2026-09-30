@@ -52,8 +52,10 @@ class ReplayViewModel(QtCore.QObject):
     speed_changed, speed = _prop("speed", float, 1.0)
     status_text_changed, status_text = _prop("status_text", str, "")
     folder_text_changed, folder_text = _prop("folder_text", str, "")
+    current_protected_changed, current_protected = _prop("current_protected", bool, False)
 
     ranges_changed = pyqtSignal()
+    protect_requested = pyqtSignal()
 
     # requests, handled by ReplayController
     toggle_requested = pyqtSignal()
@@ -102,3 +104,7 @@ class ReplayViewModel(QtCore.QObject):
     @pyqtSlot()
     def latest(self):
         self.latest_requested.emit()
+
+    @pyqtSlot()
+    def toggle_protect(self):
+        self.protect_requested.emit()

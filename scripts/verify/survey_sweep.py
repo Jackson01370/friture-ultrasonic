@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 import PyQt5
 _qt = Path(PyQt5.__file__).parent / "Qt5"
 os.environ.setdefault("QT_PLUGIN_PATH", str(_qt / "plugins"))
+os.environ.setdefault("FRITURE_RECORDING_DIR", "off")   # never the user's recording folder
 os.environ.setdefault("QML2_IMPORT_PATH", str(_qt / "qml"))
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Fusion")
 

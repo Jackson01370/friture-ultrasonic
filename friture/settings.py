@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Friture.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
 import sys
 import logging
 
@@ -270,9 +271,16 @@ class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
         settings.setValue("duoInput", self.inputTypeButtonGroup.checkedId())
         settings.setValue("showPlayback", self.checkbox_showPlayback.checkState())
         settings.setValue("historyLength", self.spinBox_historyLength.value())
-        settings.setValue("continuousRecording", self.checkbox_recording.isChecked())
-        settings.setValue("recordingDir", self.lineEdit_recordingDir.text())
-        settings.setValue("recordingCapGB", self.spinBox_recordingCap.value())
+        if getattr(self, "_recording_override", None) is not None:
+            # FRITURE_RECORDING_DIR was in force: keep the user's own choice
+            enabled, folder, cap = self._recording_override
+        else:
+            enabled = self.checkbox_recording.isChecked()
+            folder = self.lineEdit_recordingDir.text()
+            cap = self.spinBox_recordingCap.value()
+        settings.setValue("continuousRecording", enabled)
+        settings.setValue("recordingDir", folder)
+        settings.setValue("recordingCapGB", cap)
 
     # method
     def restoreState(self, settings):
@@ -292,10 +300,26 @@ class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
         # need to emit this because setValue doesn't emit editFinished
         self.history_length_changed.emit(self.spinBox_historyLength.value())
 
+        enabled = settings.value("continuousRecording", True, type=bool)
+        folder = settings.value("recordingDir", str(default_directory()), type=str)
+        cap = settings.value("recordingCapGB", DEFAULT_RECORDING_CAP_GB, type=int)
+        # FRITURE_RECORDING_DIR overrides the folder for this run only
+        # ("off" disables recording), and is never saved. Anything that runs
+        # the application for a test sets it: a layout check that opened the
+        # window with the user's settings left five empty files in the
+        # user's own recording folder.
+        self._recording_override = None
+        override = os.environ.get("FRITURE_RECORDING_DIR")
+        if override:
+            self._recording_override = (enabled, folder, cap)
+            if override.lower() == "off":
+                enabled = False
+            else:
+                enabled, folder = True, override
         self.checkbox_recording.blockSignals(True)
-        self.checkbox_recording.setChecked(settings.value("continuousRecording", True, type=bool))
+        self.checkbox_recording.setChecked(enabled)
         self.checkbox_recording.blockSignals(False)
-        self.lineEdit_recordingDir.setText(settings.value("recordingDir", str(default_directory()), type=str))
-        self.spinBox_recordingCap.setValue(settings.value("recordingCapGB", DEFAULT_RECORDING_CAP_GB, type=int))
+        self.lineEdit_recordingDir.setText(folder)
+        self.spinBox_recordingCap.setValue(cap)
         # always emitted, changed or not: this is what starts the recorder
         self._recording_settings_changed()

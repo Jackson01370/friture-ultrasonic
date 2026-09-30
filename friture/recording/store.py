@@ -32,7 +32,7 @@ import os
 import shutil
 from pathlib import Path
 
-from friture.recording.wav_segment import SegmentInfo, repair
+from friture.recording.wav_segment import HEADER_BYTES, SegmentInfo, repair
 
 BYTES_PER_GB = 1_000_000_000
 
@@ -73,6 +73,7 @@ class SegmentStore:
 
     def __init__(self, folder: Path) -> None:
         self.folder = Path(folder)
+        self.removed_empty = 0        # header-less files cleared by repair_interrupted
 
     def ensure(self) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -131,11 +132,68 @@ class SegmentStore:
                 except Exception:
                     needs = True
             if needs:
+                # Shorter than a header: nothing reached the disk, so there
+                # is nothing to recover. Left alone it stayed "open" for
+                # ever, because repair() cannot read a header that is not
+                # there; it goes, with its sidecar.
+                try:
+                    if wav.stat().st_size < HEADER_BYTES:
+                        for p in companions(wav):
+                            if p.exists():
+                                p.unlink()
+                        self.removed_empty += 1
+                        continue
+                except OSError:
+                    continue
                 try:
                     fixed.append(repair(self.folder, wav.name))
                 except Exception:
                     continue
         return fixed
+
+    def overlapping(self, start: float, end: float) -> list[SegmentInfo]:
+        """The segments holding any audio between two wall-clock times."""
+        out = []
+        for s in self.segments():
+            seg_end = s.end_epoch if s.end_epoch else s.start_epoch + s.n_frames / max(s.fs, 1)
+            if s.state == "open":
+                wav = self.folder / s.wav
+                try:
+                    frames = (wav.stat().st_size - 44) // (2 * s.channels)
+                    seg_end = s.start_epoch + frames / s.fs
+                except OSError:
+                    pass
+            if s.start_epoch <= end and seg_end >= start:
+                out.append(s)
+        return out
+
+    def set_protected(self, wavs, on: bool) -> list[str]:
+        """Mark segments protected (or not); returns the ones whose sidecar changed."""
+        changed = []
+        for wav in wavs:
+            side = self.folder / (Path(wav).stem + ".json")
+            try:
+                info = SegmentInfo.load(side)
+            except Exception:
+                continue
+            if info.protected != on:
+                info.protected = on
+                if info.save(self.folder):
+                    changed.append(info.wav)
+        return changed
+
+    def protected_bytes(self) -> tuple[int, int]:
+        """(number of protected segments, bytes they take)."""
+        n = size = 0
+        for s in self.segments():
+            if s.protected:
+                n += 1
+                for p in companions(self.folder / s.wav):
+                    try:
+                        size += p.stat().st_size
+                    except OSError:
+                        pass
+        return n, size
 
     def rotate(self, cap_bytes: int, keep: str | None = None) -> tuple[int, int]:
         """Delete the oldest unprotected segments until under cap_bytes.

@@ -12,6 +12,7 @@ os.environ.setdefault("QT_PLUGIN_PATH", str(_qt / "plugins"))
 os.environ.setdefault("QML2_IMPORT_PATH", str(_qt / "qml"))
 import os, sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("FRITURE_RECORDING_DIR", "off")   # never the user's recording folder
 os.environ.setdefault("QT_QUICK_BACKEND", "software")
 import PyQt5
 from PyQt5.QtWidgets import QApplication

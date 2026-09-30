@@ -49,6 +49,17 @@ Rectangle {
                 elide: Text.ElideRight
             }
             Button {
+                objectName: "replay_keep"
+                text: bar.viewModel.current_protected ? qsTr("Kept") : qsTr("Keep this file")
+                checkable: true
+                checked: bar.viewModel.current_protected
+                ToolTip.visible: hovered
+                ToolTip.text: bar.viewModel.current_protected
+                    ? qsTr("This file will not be deleted to make room. Click to let it go again.")
+                    : qsTr("Protect the file being replayed: it will not be deleted to make room")
+                onClicked: bar.viewModel.toggle_protect()
+            }
+            Button {
                 text: qsTr("Back to live")
                 onClicked: bar.viewModel.toggle()
             }

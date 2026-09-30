@@ -47,6 +47,7 @@ from friture.settings import Settings_Dialog  # Setting dialog
 from friture.audiobuffer import AudioBuffer  # audio ring buffer class
 from friture.audiobackend import AudioBackend, FRAMES_PER_BUFFER, SAMPLING_RATE  # audio backend class
 from friture.recording.recorder import ContinuousRecorder
+from friture.recording.session import GetRecordingSession
 from friture.recording.store import BYTES_PER_GB
 from friture.replay_control import ReplayController
 from friture.replay_view_model import ReplayViewModel
@@ -237,6 +238,13 @@ class Friture(QMainWindow, ):
         self._main_window_view_model.toolbar_view_model.replay_clicked.connect(self.replay.toggle)
         self.replay.mode_changed.connect(self._replay_mode_changed)
         self.replay.playing_changed.connect(self._replay_playing_changed)
+
+        # what the Recording Events dock reaches for (it is built with
+        # nothing but a parent, like every dock)
+        session = GetRecordingSession()
+        session.get_folder = lambda: self.settings_dialog.lineEdit_recordingDir.text()
+        session.recorder = self.recorder
+        session.replay = self.replay
 
         # restore the settings and widgets geometries
         self.restoreAppState()

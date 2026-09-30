@@ -25,7 +25,8 @@ RowLayout {
             "Long-time levels",
             "Pitch Tracker",
             "Digital Decode",
-            "Band Survey"
+            "Band Survey",
+            "Recording Events"
         ]
         currentIndex: viewModel.currentIndex
         onCurrentIndexChanged: viewModel.currentIndex = currentIndex

@@ -48,6 +48,7 @@ ppm off moves "when did it happen" by seconds.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import queue
 import threading
@@ -158,6 +159,13 @@ class ContinuousRecorder:
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="friture-recorder", daemon=True)
             self._thread.start()
+            # The application calls shutdown() from closeEvent, but a process
+            # can end without one -- a script that never closes its window,
+            # a sys.exit from elsewhere -- and the daemon threads are then
+            # simply stopped, mid-file. atexit still runs in those cases (not
+            # after a hard kill, which repair() is for), so the file is
+            # closed properly. shutdown() is safe to call twice.
+            atexit.register(self.shutdown)
         if self._analysis_thread is None:
             self._analysis_thread = threading.Thread(target=self._run_analysis,
                                                      name="friture-recording-analysis", daemon=True)
@@ -181,6 +189,17 @@ class ContinuousRecorder:
     def configure(self, enabled: bool, folder, cap_gb: float) -> None:
         self._commands.put(("configure", bool(enabled), Path(folder), float(cap_gb)))
         self._enabled = bool(enabled)
+
+    def set_protected(self, wav: str, on: bool) -> None:
+        """Keep the segment being written in step with a protection change.
+
+        Called from the GUI thread alongside SegmentStore.set_protected; the
+        writer saves its in-memory sidecar when the file closes, so that
+        copy has to agree. A bool assignment, so no lock is needed.
+        """
+        w = self._writer
+        if w is not None and w.info.wav == wav:
+            w.info.protected = bool(on)
 
     def status(self) -> RecorderStatus:
         with self._status_lock:

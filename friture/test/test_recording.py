@@ -138,7 +138,60 @@ class WavSegmentTest(unittest.TestCase):
         self.assertTrue(np.array_equal(data, np.concatenate(blocks)[:, 0]))
 
 
+    def test_the_header_reaches_the_disk_the_moment_the_file_opens(self):
+        """A process that ended before the first flush used to leave 0 bytes."""
+        w = WavSegmentWriter(self.dir, self._info())
+        self.assertEqual((self.dir / "a.wav").stat().st_size, 44)
+        w.close(0.0)
+
+
+class ExitWithoutShutdownTest(unittest.TestCase):
+    """The process ends and nobody called shutdown() -- a script that never
+    closed its window did exactly this, into the user's own folder, and left
+    0-byte files that stayed "open" for ever."""
+
+    def test_the_segment_is_closed_properly_anyway(self):
+        import subprocess
+        import sys
+        import textwrap
+        folder = Path(tempfile.mkdtemp())
+        try:
+            code = textwrap.dedent("""
+                import sys, time
+                import numpy as np
+                from friture.recording.recorder import ContinuousRecorder
+                rec = ContinuousRecorder(250000, 2048)
+                rec.start()
+                rec.configure(True, sys.argv[1], 50)
+                t0 = time.monotonic()
+                while rec.status().state not in ("waiting", "recording") and time.monotonic() - t0 < 5:
+                    time.sleep(0.02)
+                b = (np.arange(2048).reshape(-1, 1) % 100 / 32768).astype(np.float32)
+                for i in range(20):
+                    rec.push(b, 0, i * 2048, 1000.0 + i * 2048 / 250000, False)
+                time.sleep(0.2)
+            """)
+            root = Path(__file__).resolve().parents[2]
+            subprocess.run([sys.executable, "-c", code, str(folder)], cwd=root, check=True, timeout=60)
+            segs = SegmentStore(folder).segments()
+            self.assertEqual(len(segs), 1)
+            self.assertEqual(segs[0].state, "closed")
+            self.assertEqual(segs[0].n_frames, 20 * 2048)
+            self.assertEqual((folder / segs[0].wav).stat().st_size, 44 + 20 * 2048 * 2)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 class StoreTest(unittest.TestCase):
+
+    def test_a_header_less_file_is_cleared_not_left_open(self):
+        (self.dir / "2026-01-01_00-00-00.000.wav").write_bytes(b"")
+        SegmentInfo(wav="2026-01-01_00-00-00.000.wav", fs=FS, channels=1, start_epoch=0.0,
+                    start_local="x", run_id="r", run_index=0).save(self.dir)   # state "open"
+        store = SegmentStore(self.dir)
+        self.assertEqual(store.repair_interrupted(), [])
+        self.assertEqual(store.removed_empty, 1)
+        self.assertEqual(list(self.dir.iterdir()), [])
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
