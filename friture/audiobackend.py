@@ -17,8 +17,12 @@
 # You should have received a copy of the GNU General Public License
 # along with Friture.  If not, see <http://www.gnu.org/licenses/>.
 
+import atexit
+import collections
 import logging
 import math
+import threading
+import time
 
 from PyQt5 import QtCore
 import sounddevice
@@ -48,6 +52,31 @@ FRAMES_PER_BUFFER = 2048
 
 # The same 10.7 ms, counted at the playback rate.
 OUTPUT_FRAMES_PER_BUFFER = 512
+
+# ★ THE RING BUFFER IS DRAINED BY ITS OWN THREAD, NOT BY THE DISPLAY TIMER ★
+#
+# It used to be drained by the display timer on the GUI thread, and that has
+# a failure nobody could see: rtmixer's record action STOPS for good the
+# moment its ring buffer fills, and says nothing about it. Measured on the
+# UltraMic: after 5 s without a fetch, exactly the 2.10 s the ring held was
+# delivered and then nothing more, ever -- no overflow flag, input_overflows
+# still 0, the stream still "active". (The ring is sized for 3 s but rounded
+# DOWN to a power of two, 2**19 frames, which is 2.1 s at 250 kHz.) So any
+# stall of the GUI thread longer than two seconds silently ended the capture
+# for the rest of the session.
+#
+# A thread that does nothing but move blocks out of the ring cannot be
+# stalled by a slow dock or a busy window. What it reads goes two ways:
+#   - to the raw sinks, immediately, on this thread -- the continuous
+#     recorder is one, and it must never miss a block whatever the GUI does;
+#   - to a queue the display timer empties, which is allowed to lose its
+#     oldest blocks if the GUI falls far behind, because a picture that is
+#     late is not worth having.
+CAPTURE_POLL_S = 0.004
+DISPLAY_BACKLOG_S = 10.0
+# The action is presumed dead if the stream runs this long with nothing
+# arriving; it is then re-issued and the break is reported as a new run.
+DEAD_ACTION_S = 0.5
 
 __audiobackendInstance = None
 
@@ -112,6 +141,32 @@ class __AudioBackend(QtCore.QObject):
         self.ringBuffer = None
         self.action = None
         self.nchannels_max = 0
+        self.stream_start_time = 0.0
+        self.stream_read_index = 0
+
+        # Everything the capture thread and the GUI thread both touch --
+        # stream, ringBuffer, action and the run bookkeeping -- is guarded
+        # by this lock. The thread holds it for one drain at a time, well
+        # under a millisecond, so a GUI call waits at most that long.
+        self._lock = threading.RLock()
+        self._display_queue = collections.deque()
+        self._display_dropped = 0
+        self._raw_sinks = []
+        # A RUN is a stretch of samples with no break in it. It starts again
+        # whenever continuity cannot be vouched for: a stop and start, a new
+        # device, a record action that died and had to be re-issued. Sinks
+        # get (run, index within the run) with every block, so a recording
+        # can split exactly where a break happened instead of splicing
+        # across it.
+        self._run_id = 0
+        self._run_index = 0
+        self.capture_restarts = 0
+        self._quiet_since = None
+        # Delivery happens only between restart() and pause() -- the span
+        # the user sees as "capturing". Outside it the ring is still read,
+        # to keep rtmixer's action alive, but what is read is dropped: it
+        # belongs to no run anyone asked for.
+        self._running = False
 
         # we will try to open all the input devices until one
         # works, starting by the default input device
@@ -140,7 +195,178 @@ class __AudioBackend(QtCore.QObject):
 
         self.devices_with_timing_errors = []
 
+        self._capture_stop = threading.Event()
+        self._capture_thread = threading.Thread(
+            target=self._capture_loop, name="friture-capture", daemon=True)
+        self._capture_thread.start()
+        # sounddevice terminates PortAudio in its own atexit handler, and any
+        # program that exits without calling close() would leave this thread
+        # polling a terminated library -- measured: a stream of "PortAudio
+        # not initialized" tracebacks on the way out. atexit runs handlers
+        # last-registered first, and sounddevice registered its handler when
+        # it was imported, before this, so this one runs first.
+        atexit.register(self._stop_capture_thread)
+
+    def _stop_capture_thread(self):
+        self._capture_stop.set()
+        if self._capture_thread.is_alive() and threading.current_thread() is not self._capture_thread:
+            self._capture_thread.join(timeout=1.0)
+
+    def add_raw_sink(self, sink):
+        """Register sink(block, run_id, run_index, t_first, overflow).
+
+        Called ON THE CAPTURE THREAD for every block, before the display
+        sees it: block is float32 (frames, channels) exactly as captured,
+        run_id / run_index place it in an unbroken run (see __init__),
+        t_first estimates the wall-clock time of its first sample, and
+        overflow says PortAudio reported lost input just before it. A sink
+        must be quick and thread-safe -- hand the block to a queue and
+        return.
+        """
+        with self._lock:
+            self._raw_sinks.append(sink)
+
+    def remove_raw_sink(self, sink):
+        with self._lock:
+            if sink in self._raw_sinks:
+                self._raw_sinks.remove(sink)
+
+    def _new_run(self):
+        """Declare that continuity is broken from here on. Lock held."""
+        self._run_id += 1
+        self._run_index = 0
+
+    def _capture_loop(self):
+        while not self._capture_stop.is_set():
+            try:
+                with self._lock:
+                    self._drain()
+            except Exception:
+                self.logger.exception("Capture thread failed to drain the ring buffer")
+            time.sleep(CAPTURE_POLL_S)
+
+    def _discard_ring(self):
+        """Throw away whatever is in the ring. Lock held."""
+        if self.ringBuffer is not None:
+            left = self.ringBuffer.read_available
+            if left:
+                self.ringBuffer.advance_read_index(left)
+
+    def _drain_tail(self):
+        """Deliver the last partial block of a run to the raw sinks. Lock held.
+
+        Called by pause() after the stream has stopped, so what is left is
+        the end of this run and nothing will follow it. The display has no
+        use for less than a block; a recording does -- it is audio.
+        """
+        if self.ringBuffer is None:
+            return
+        left = self.ringBuffer.read_available
+        if left <= 0:
+            return
+        read, buf1, buf2 = self.ringBuffer.get_read_buffers(left)
+        block = concatenate((frombuffer(buf1, dtype='float32'),
+                             frombuffer(buf2, dtype='float32')))
+        block.shape = -1, self.nchannels_max
+        self.ringBuffer.advance_read_index(read)
+        t_first = time.time() - read / SAMPLING_RATE
+        for sink in self._raw_sinks:
+            try:
+                sink(block, self._run_id, self._run_index, t_first, False)
+            except Exception:
+                self.logger.exception("A raw capture sink failed")
+        self._run_index += read
+
+    def _drain(self):
+        """Move every whole block out of the ring. Lock held."""
+        if self.stream is None or self.ringBuffer is None or self.action is None:
+            return
+        available = self.ringBuffer.read_available
+        if available < FRAMES_PER_BUFFER:
+            self._check_action_alive()
+            return
+        self._quiet_since = None
+        if not self._running:
+            self._discard_ring()
+            return
+
+        now_wall = time.time()
+        now_stream = self.get_stream_time()
+        input_overflows = self.action.stats.input_overflows
+        overflow = input_overflows > self.xruns
+        if overflow:
+            self.xruns = input_overflows
+            self.logger.info("Stream overflow!")
+
+        k = 0
+        while self.ringBuffer.read_available >= FRAMES_PER_BUFFER:
+            read, buf1, buf2 = self.ringBuffer.get_read_buffers(FRAMES_PER_BUFFER)
+            assert read == FRAMES_PER_BUFFER
+            block = concatenate((frombuffer(buf1, dtype='float32'),
+                                 frombuffer(buf2, dtype='float32')))
+            block.shape = -1, self.nchannels_max
+            self.ringBuffer.advance_read_index(FRAMES_PER_BUFFER)
+
+            self.stream_read_index += read
+            stream_read_time = self.stream_start_time + self.stream_read_index / SAMPLING_RATE
+            # when starting a stream, PortAudio hands over some data that was
+            # already buffered, so the stream start time is actually older
+            if stream_read_time > now_stream and self.stream_read_index < 100000:
+                self.stream_start_time -= stream_read_time - now_stream
+                stream_read_time = now_stream
+
+            # the first sample of this block sat (backlog behind it) frames
+            # before the moment the drain began
+            t_first = now_wall - (available - k * FRAMES_PER_BUFFER) / SAMPLING_RATE
+            block_overflow = overflow and k == 0
+            for sink in self._raw_sinks:
+                try:
+                    sink(block, self._run_id, self._run_index, t_first, block_overflow)
+                except Exception:
+                    self.logger.exception("A raw capture sink failed")
+            self._run_index += read
+
+            self._display_queue.append((block, stream_read_time, block_overflow))
+            k += 1
+
+        limit = int(DISPLAY_BACKLOG_S * SAMPLING_RATE / FRAMES_PER_BUFFER)
+        while len(self._display_queue) > limit:
+            self._display_queue.popleft()
+            self._display_dropped += 1
+            if self._display_dropped == 1 or self._display_dropped % 1000 == 0:
+                self.logger.warning("Display fell %.0f s behind the capture; %d blocks skipped "
+                                    "for display only (recording is unaffected)",
+                                    DISPLAY_BACKLOG_S, self._display_dropped)
+
+    def _check_action_alive(self):
+        """Re-issue the record action if it has died. Lock held.
+
+        This is the safety net under the thread, not the fix: the thread
+        keeps the ring from filling. But if something ever does starve it,
+        the difference between a gap and a capture that silently ends for
+        the rest of the session is this check.
+        """
+        if not self.stream.active:
+            self._quiet_since = None
+            return
+        now = time.monotonic()
+        if self._quiet_since is None:
+            self._quiet_since = now
+            return
+        if now - self._quiet_since < DEAD_ACTION_S:
+            return
+        self._quiet_since = None
+        if self.action in self.stream.actions:
+            return
+        self.logger.warning("The record action had stopped (its ring buffer filled); "
+                            "re-issuing it. Samples in between are lost and a new run begins.")
+        self.action = self.stream.record_ringbuffer(self.ringBuffer)
+        self.xruns = 0                       # a new action counts from zero
+        self.capture_restarts += 1
+        self._new_run()
+
     def close(self):
+        self._stop_capture_thread()
         self.release_stream()
 
     def release_stream(self):
@@ -152,14 +378,17 @@ class __AudioBackend(QtCore.QObject):
         with "Invalid device" -- from the message alone it looks like the
         microphone is at fault rather than us.
         """
-        if self.stream is None:
-            return
-        try:
-            self.stream.stop()
-            self.stream.close()
-        except Exception:
-            self.logger.exception("Failed to release the capture stream")
-        self.stream = None
+        with self._lock:
+            if self.stream is None:
+                return
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                self.logger.exception("Failed to release the capture stream")
+            self.stream = None
+            self._display_queue.clear()
+            self._new_run()
 
     # method
     def get_readable_devices_list(self):
@@ -311,18 +540,21 @@ class __AudioBackend(QtCore.QObject):
         # first costs the fallback; there is no way to have both.
         self.release_stream()
 
-        try:
-            (self.stream, self.ringBuffer, self.action, self.nchannels_max) = self.open_stream(device)
-            self.device = device
-            self.stream.start()
-            self.stream_start_time = self.stream.time
-            self.stream_read_index = 0
-            success = True
-        except Exception:
-            self.logger.exception("Failed to open input device")
-            success = False
-            self.stream = None
-            self.device = previous_device
+        with self._lock:
+            try:
+                (self.stream, self.ringBuffer, self.action, self.nchannels_max) = self.open_stream(device)
+                self.device = device
+                self.stream.start()
+                self.stream_start_time = self.stream.time
+                self.stream_read_index = 0
+                self.xruns = 0
+                self._new_run()
+                success = True
+            except Exception:
+                self.logger.exception("Failed to open input device")
+                success = False
+                self.stream = None
+                self.device = previous_device
 
         if success:
             self.logger.info("Success")
@@ -508,35 +740,18 @@ class __AudioBackend(QtCore.QObject):
         return device['max_output_channels']
 
     def fetchAudioData(self):
-        if self.action is None or self.ringBuffer is None:
-            return
+        """Hand the blocks the capture thread has queued to the display.
 
-        while self.ringBuffer.read_available >= FRAMES_PER_BUFFER:
-            read, buf1, buf2 = self.ringBuffer.get_read_buffers(FRAMES_PER_BUFFER)
-            assert read == FRAMES_PER_BUFFER
-
-            stream_time = self.get_stream_time()
-
-            buffer1 = frombuffer(buf1, dtype='float32')
-            buffer2 = frombuffer(buf2, dtype='float32')
-            buffer = concatenate((buffer1, buffer2)).astype(float64)
-            buffer.shape = -1, self.nchannels_max
-            self.ringBuffer.advance_read_index(FRAMES_PER_BUFFER)
-
-            # ideally we would use the exact time of the samples retrieved from the ring buffer,
-            # but rtmixer does not provide it
-            self.stream_read_index += read
-            stream_read_time = self.stream_start_time + self.stream_read_index / SAMPLING_RATE
-
-            # when starting a stream, it seems PortAudio gives us some data that is already in the buffer
-            # so the stream start time is actually older
-            # so we compensate here
-            if stream_read_time > stream_time and self.stream_read_index < 100000:
-                delta_seconds = stream_read_time - stream_time
-                self.stream_start_time -= delta_seconds
-
-            if stream_read_time < stream_time - 100 * FRAMES_PER_BUFFER / SAMPLING_RATE:
-                self.logger.warning("Ringbuffer lagging behind: ringbuffer time = %f, stream time = %f", stream_read_time, stream_time)
+        Runs on the GUI thread, from the display timer. It no longer touches
+        the ring buffer -- see CAPTURE_POLL_S -- so however late it runs,
+        the capture carries on and only the display falls behind.
+        """
+        while True:
+            with self._lock:
+                if not self._display_queue:
+                    return
+                raw, stream_read_time, input_overflow = self._display_queue.popleft()
+            buffer = raw.astype(float64)
 
             channel = self.get_current_first_channel()
             if self.duo_input:
@@ -548,14 +763,9 @@ class __AudioBackend(QtCore.QObject):
                 floatdata2 = buffer[:, channel_2]
                 floatdata = vstack((floatdata1, floatdata2))
             else:
-                floatdata = floatdata1
-                floatdata.shape = (1, floatdata.size)
+                floatdata = floatdata1.reshape(1, -1)
 
-            input_overflows = self.action.stats.input_overflows
-            input_overflow = input_overflows > self.xruns
             if input_overflow:
-                self.xruns = input_overflows
-                self.logger.info("Stream overflow!")
                 self.underflow.emit()
 
             self.new_data_available.emit(floatdata, stream_read_time, input_overflow)
@@ -595,11 +805,36 @@ class __AudioBackend(QtCore.QObject):
             return 0
 
     def pause(self):
-        if self.stream is not None:
-            self.stream.stop()
+        """Stop capturing. The blocks already captured stay in this run.
+
+        They used not to: the run was renumbered first and the capture
+        thread drained what was left in the ring afterwards, so the last
+        blocks before a stop came out as a separate run. Measured on a
+        32-minute recording: a stop left a 16 ms file of its own, recorded
+        as following "a 0.022 s gap" that never happened -- those two
+        blocks were the direct continuation of the file before. stop()
+        returns once PortAudio has handed over its last buffer, so draining
+        after it and only then starting a new run keeps them where they
+        belong.
+        """
+        with self._lock:
+            if self.stream is not None:
+                self.stream.stop()
+                if self._running:
+                    self._drain()
+                    self._drain_tail()
+            self._running = False
+            self._display_queue.clear()
+            self._new_run()
 
     def restart(self):
-        if self.stream is not None:
-            self.stream.start()
-            self.stream_start_time = self.stream.time
-            self.stream_read_index = 0
+        """Start capturing. Whatever sat in the ring from before is stale."""
+        with self._lock:
+            if self.stream is not None:
+                self._discard_ring()
+                self.stream.start()
+                self.stream_start_time = self.stream.time
+                self.stream_read_index = 0
+            self._display_queue.clear()
+            self._new_run()
+            self._running = True
