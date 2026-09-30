@@ -57,6 +57,18 @@ def inside_git_worktree(folder: Path) -> Path | None:
     return None
 
 
+ANALYSIS_SUFFIX = ".analysis.jsonl"      # see friture.recording.analysis_log
+
+
+def companions(wav: Path) -> list[Path]:
+    """Every file that belongs to one segment: the audio, its sidecar, its log.
+
+    Rotation deletes them together and the cap counts them together; a log
+    left behind by a deleted WAV would describe audio that no longer exists.
+    """
+    return [wav, wav.with_suffix(".json"), wav.parent / (wav.stem + ANALYSIS_SUFFIX)]
+
+
 class SegmentStore:
 
     def __init__(self, folder: Path) -> None:
@@ -84,7 +96,7 @@ class SegmentStore:
     def total_bytes(self) -> int:
         total = 0
         for wav in self.wav_files():
-            for p in (wav, wav.with_suffix(".json")):
+            for p in companions(wav):
                 try:
                     total += p.stat().st_size
                 except OSError:
@@ -95,12 +107,23 @@ class SegmentStore:
         return shutil.disk_usage(self.folder).free
 
     def repair_interrupted(self, exclude: str | None = None) -> list[SegmentInfo]:
-        """Repair every segment a crash left open, except the one in use."""
+        """Repair every segment a crash left open, except the one in use.
+
+        A <stem>.json.tmp beside a segment is a save that Windows would not
+        let finish (the sidecar was held open by someone else); it is the
+        newer state, so it is adopted first.
+        """
         fixed = []
         for wav in self.wav_files():
             if wav.name == exclude:
                 continue
             side = wav.with_suffix(".json")
+            pending = wav.with_suffix(".json.tmp")
+            if pending.exists():
+                try:
+                    os.replace(pending, side)
+                except OSError:
+                    pass
             needs = not side.exists()
             if not needs:
                 try:
@@ -139,7 +162,7 @@ class SegmentStore:
         for wav in candidates:            # sorted by name = by start time
             if total <= cap_bytes:
                 break
-            for p in (wav, wav.with_suffix(".json")):
+            for p in companions(wav):
                 try:
                     size = p.stat().st_size
                     p.unlink()

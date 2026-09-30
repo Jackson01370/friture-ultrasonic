@@ -20,6 +20,19 @@ If recorder_long_run.py left a _run_log.jsonl beside the files, one more:
   COMPLETE   within each capture run, the frames the capture thread read
              kept pace with the audio device clock. A ring buffer that
              overflowed shows up here as seconds missing.
+
+And for the analysis logs (<stem>.analysis.jsonl) -- skip with --no-analysis:
+
+  LOGGED     every segment of a second or more has a log with a header, and
+             every record in it points inside that segment
+  COVERED    per run, the level records add up to the run's duration (a
+             level record is one second) and none of them overlap
+  CONTAINED  no record's window runs past the end of its capture run
+
+  --compare-with DIR  compares these logs with the logs in DIR (made by
+             analyse_recordings.py --out DIR from the same audio): every
+             record must match except for the wall-clock time, which live
+             is an estimate per block and offline is computed.
 """
 
 import json
@@ -135,6 +148,70 @@ if log_path.exists():
         fail("COMPLETE", "the record action died %d time(s)" % restarts)
     if dropped:
         fail("COMPLETE", "%d blocks were dropped before reaching the disk" % dropped)
+
+if "--no-analysis" not in args and segs:
+    from friture.recording.analysis_log import log_path, read_log
+    fs0 = segs[0].fs
+    print("\nanalysis logs:")
+    per_run = defaultdict(list)
+    run_end = {}
+    for s in segs:
+        run_end[s.run_id] = max(run_end.get(s.run_id, 0), s.run_index + s.n_frames)
+    torn = 0
+    for s in segs:
+        stem = s.wav[:-4]
+        head, recs, bad = read_log(log_path(folder, stem))
+        torn += bad
+        if head is None:
+            if s.n_frames >= s.fs:
+                fail("LOGGED", "%s has no analysis log" % s.wav)
+            continue
+        for r in recs:
+            if r["seg"] != stem or not (0 <= r["pos"] < s.n_frames):
+                fail("LOGGED", "%s: a record points at %s:%d" % (s.wav, r["seg"], r["pos"]))
+                break
+            per_run[r["run"]].append(r)
+    counts = defaultdict(int)
+    for run_id, recs in per_run.items():
+        for r in recs:
+            counts[r["kind"]] += 1
+            if r["idx"] + r.get("n", round(r["dur"] * fs0)) > run_end.get(run_id, 0):
+                fail("CONTAINED", "a %s record at %d runs past the end of run %s" % (r["kind"], r["idx"], run_id))
+        levels = sorted((r["idx"], r.get("n", round(r["dur"] * fs0))) for r in recs if r["kind"] == "levels")
+        for (a, la), (b, _) in zip(levels, levels[1:]):
+            if b < a + la:
+                fail("COVERED", "run %s: level records overlap at %d" % (run_id, b))
+                break
+        run_frames = sum(x.n_frames for x in segs if x.run_id == run_id)
+        covered = sum(l for _, l in levels)
+        share = covered / run_frames if run_frames else 1.0
+        print("   run %s: levels cover %.1f%% of %.1f s" % (run_id, 100 * share, run_frames / fs0))
+        # everything but a final remnant under MIN_FRACTION of a second
+        if run_frames - covered > 0.4 * fs0 + 1:
+            fail("COVERED", "run %s: %.2f s has no level record" % (run_id, (run_frames - covered) / fs0))
+    print("   records: %s; torn lines skipped %d" % (dict(counts), torn))
+
+    if "--compare-with" in args:
+        other = Path(args[args.index("--compare-with") + 1])
+        print("\ncomparing with the logs in %s:" % other)
+        same = differ = 0
+        for s in segs:
+            stem = s.wav[:-4]
+            _, a, _ = read_log(log_path(folder, stem))
+            _, b, _ = read_log(log_path(other, stem))
+            # order-insensitive: records come out in the order their windows
+            # complete, which depends on how the audio was cut into pieces
+            strip = lambda rs: sorted(({k: v for k, v in r.items() if k != "t"} for r in rs),
+                                      key=lambda r: (r["idx"], r["kind"]))
+            a_s, b_s = strip(a), strip(b)
+            if a_s == b_s:
+                same += len(a_s)
+                continue
+            differ += 1
+            fail("COMPARE", "%s: %d records here, %d there, first difference at %s"
+                 % (s.wav, len(a_s), len(b_s),
+                    next((i for i, (x, y) in enumerate(zip(a_s, b_s)) if x != y), min(len(a_s), len(b_s)))))
+        print("   %d records identical apart from the timestamp; %d file(s) differ" % (same, differ))
 
 print("\n%s" % ("ALL OK" if not problems else "%d PROBLEM(S)" % len(problems)))
 sys.exit(0 if not problems else 1)

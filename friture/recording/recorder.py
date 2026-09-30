@@ -58,6 +58,8 @@ from pathlib import Path
 
 import numpy as np
 
+from friture.recording.analysis import LiveAnalysis, Where
+from friture.recording.analysis_log import AnalysisLog
 from friture.recording.store import BYTES_PER_GB, SegmentStore
 from friture.recording.wav_segment import (
     BYTES_PER_SAMPLE,
@@ -68,6 +70,10 @@ from friture.recording.wav_segment import (
 )
 
 log = logging.getLogger(__name__)
+
+# WHAT IS WRITTEN BESIDE THE AUDIO is decided in friture.recording.analysis:
+# levels every second, a voice score every 5 s and the Band Survey lines
+# every minute, in <stem>.analysis.jsonl next to each WAV.
 
 
 @dataclass
@@ -83,12 +89,21 @@ class RecorderStatus:
     segments_closed: int = 0
     recovered: int = 0
     over_cap_bytes: int = 0       # protected segments alone exceed the cap
+    analysis_lag_s: float = 0.0   # audio written but not yet analysed
+    analysis_skipped_s: float = 0.0   # audio the analysis had to skip to keep up
+    errors: int = 0               # errors the writer recovered from this session
+    sidecars_deferred: int = 0    # sidecars Windows would not let it replace in time
 
 
 class ContinuousRecorder:
 
     SEGMENT_S = 600.0             # 10 minutes, 300 MB at 250 kHz mono
     QUEUE_S = 60.0                # how far the disk may fall behind the capture
+    # How far the analysis may fall behind the recording before it skips.
+    # The analysis costs about 5% of a core (measured: 125 s of recording in
+    # 5.9 s of CPU), so it only falls behind when the machine is starved,
+    # and then it is the analysis that gives way, never the audio.
+    ANALYSIS_QUEUE_S = 120.0
     IDLE_CLOSE_S = 2.0
     HOUSEKEEPING_S = 30.0         # rotation and free-space checks
     MIN_FREE_BYTES = 2 * BYTES_PER_GB
@@ -110,6 +125,17 @@ class ContinuousRecorder:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+        # The analysis runs on a thread of its own, fed by the writer AFTER
+        # each piece is on disk, so it sees exactly what was recorded and
+        # knows which file and offset each piece landed at.
+        self._frames_per_block = int(frames_per_block)
+        self._aq: queue.Queue = queue.Queue(
+            maxsize=max(16, int(self.ANALYSIS_QUEUE_S * fs / frames_per_block)))
+        self._analysis_thread: threading.Thread | None = None
+        self._analysis = LiveAnalysis(self.fs)
+        self._alog = AnalysisLog(self.fs)
+        self._skipped_frames = 0
+
         # writer-thread state
         self._store: SegmentStore | None = None
         self._cap_bytes = 0
@@ -123,6 +149,8 @@ class ContinuousRecorder:
         self._stored_bytes_at_housekeeping = 0
         self._segments_closed = 0
         self._paused_for_space = False
+        self._errors = 0
+        self._deferred = 0
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -130,14 +158,23 @@ class ContinuousRecorder:
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="friture-recorder", daemon=True)
             self._thread.start()
+        if self._analysis_thread is None:
+            self._analysis_thread = threading.Thread(target=self._run_analysis,
+                                                     name="friture-recording-analysis", daemon=True)
+            self._analysis_thread.start()
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Write out what is queued, close the segment, stop the thread."""
+        """Write out what is queued, close the segment, then finish the analysis."""
         self._enabled = False
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
+        if self._analysis_thread is not None:
+            self._aq.put(("stop",))
+            # at 5% of a core even a full queue is a few seconds of work
+            self._analysis_thread.join(timeout + 15.0)
+            self._analysis_thread = None
 
     # -- called from the GUI thread ------------------------------------------------
 
@@ -164,26 +201,38 @@ class ContinuousRecorder:
     # -- the writer thread ---------------------------------------------------------
 
     def _run(self) -> None:
+        # NOTHING MAY END THIS LOOP BUT A STOP. It used to guard only the write
+        # itself, and a sidecar that Windows would not let it replace -- a
+        # reader held the file open -- raised out of the idle close and killed
+        # the thread: the recording ended for good, silently. Found by a test
+        # that failed one run in six. Whatever goes wrong now is logged,
+        # counted, shown, and the loop carries on; the next block that is
+        # written clears the error state.
         while True:
-            self._handle_commands()
             try:
-                item = self._q.get(timeout=0.25)
-            except queue.Empty:
-                if self._stop.is_set():
-                    break
-                if self._writer is not None and time.monotonic() - self._last_data_at > self.IDLE_CLOSE_S:
-                    self._close("the capture stopped")
-                self._housekeeping()
-                continue
-            try:
+                self._handle_commands()
+                try:
+                    item = self._q.get(timeout=0.25)
+                except queue.Empty:
+                    if self._stop.is_set():
+                        break
+                    if self._writer is not None and time.monotonic() - self._last_data_at > self.IDLE_CLOSE_S:
+                        self._close("the capture stopped")
+                    self._housekeeping()
+                    continue
                 self._write(*item)
-            except OSError as e:
-                log.exception("Recording write failed")
+                self._housekeeping()
+            except Exception as e:
+                log.exception("Recording hit an error; carrying on")
+                self._errors += 1
                 self._close_quietly()
-                self._set(state="error", message="cannot write: %s" % e)
-                time.sleep(1.0)
-            self._housekeeping()
-        self._close("the application closed")
+                self._set(state="error", errors=self._errors,
+                          message="%s: %s" % (type(e).__name__, e))
+                time.sleep(0.5)
+        try:
+            self._close("the application closed")
+        except Exception:
+            log.exception("Could not close the last segment cleanly")
         self._set(state="off", message="stopped")
 
     def _handle_commands(self) -> None:
@@ -248,7 +297,10 @@ class ContinuousRecorder:
         while offset < frames:
             room = self.segment_frames - self._writer.n_frames
             piece = data[offset:offset + room]
+            pos = self._writer.n_frames
             self._writer.write(piece)
+            self._to_analysis(piece, Where(Path(self._writer.info.wav).stem, pos, key,
+                                           run_index + offset, t_first + offset / self.fs))
             offset += piece.shape[0]
             self._last_end_epoch = t_first + offset / self.fs
             self._expect = (key, run_index + offset)
@@ -307,15 +359,59 @@ class ContinuousRecorder:
         self._writer = None
         anchor = self._run_start[1:] if self._run_start and self._run_start[0] == w.info.run_id else None
         info = w.close(self._last_end_epoch, anchor)
+        saved = w.saved
         if reason:
             info.notes = list(info.notes) + ["ended because %s" % reason]
-            info.save(self._store.folder)
+            saved = info.save(self._store.folder)
+        if not saved:
+            self._deferred += 1
+            log.warning("The sidecar of %s stayed locked; its closed state waits in .json.tmp", info.wav)
+            self._set(sidecars_deferred=self._deferred)
         self._last_closed = (info.run_id, info.run_index + info.n_frames, info.wav, info.end_epoch)
+        if reason:
+            # a real break: the analysis writes out its windows in progress
+            # now rather than when the next run's audio shows the break
+            try:
+                self._aq.put(("flush", self._store.folder), timeout=5.0)
+            except queue.Full:
+                pass
         self._segments_closed += 1
         self._stored_bytes_at_housekeeping += w.file_bytes
         self._set(segments_closed=self._segments_closed, current_file="", current_seconds=0.0,
                   state="waiting" if reason else "recording")
         self._next_housekeeping = 0.0             # rotate right away
+
+    def _to_analysis(self, piece: np.ndarray, where: Where) -> None:
+        try:
+            self._aq.put_nowait(("data", self._store.folder, piece, where))
+        except queue.Full:
+            # the audio is on disk; only its analysis is lost, and the gap in
+            # the run index makes the analysis start its windows afresh
+            self._skipped_frames += piece.shape[0]
+
+    def _run_analysis(self) -> None:
+        """The analysis thread: pieces in, log records out."""
+        while True:
+            item = self._aq.get()
+            try:
+                if item[0] == "stop":
+                    break
+                if item[0] == "flush":
+                    folder = item[1]
+                    records = self._analysis.flush()
+                else:
+                    _, folder, piece, where = item
+                    records = self._analysis.feed(piece, where)
+                for rec in records:
+                    self._alog.write(folder, rec)
+            except Exception:
+                log.exception("Recording analysis failed; the audio is unaffected")
+            self._set(analysis_lag_s=self._aq.qsize() * self._frames_per_block / self.fs,
+                      analysis_skipped_s=self._skipped_frames / self.fs)
+        try:
+            self._alog.close()
+        except Exception:
+            pass
 
     def _close_quietly(self) -> None:
         try:

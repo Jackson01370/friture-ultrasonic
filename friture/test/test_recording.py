@@ -274,6 +274,68 @@ class RecorderTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: len(self._closed()) == 1, timeout=3.0))
         self.assertIn("the capture stopped", " ".join(self._closed()[0].notes))
 
+    def test_a_sidecar_held_open_by_someone_else_does_not_kill_the_recorder(self):
+        """Found by a flaky test: on Windows a file that anyone has open cannot be
+        replaced, os.replace raised PermissionError, and the writer thread died
+        -- the recording stopped for good, silently. Antivirus, the search
+        indexer and a program reading the sidecars all hold files open like
+        this. The recorder must ride it out and keep recording.
+        """
+        self._start()
+        rng = np.random.default_rng(13)
+        self.rec.push(grid_block(rng), 0, 0, 5.0, False)
+        self.assertTrue(wait_for(lambda: list(self.dir.glob("*.json")), timeout=3.0))
+        side = sorted(self.dir.glob("*.json"))[0]
+        holder = open(side, "rb")                     # someone reading it, and not letting go
+        try:
+            time.sleep(1.0)                           # the idle close runs while it is held
+        finally:
+            holder.close()
+        self.assertTrue(self.rec._thread.is_alive(), "the writer thread died")
+        self.assertTrue(wait_for(lambda: len(self._closed()) == 1, timeout=5.0),
+                        "the held segment never got closed")
+        # and it is still recording afterwards
+        self.rec.push(grid_block(rng), 1, 0, 50.0, False)
+        self.assertTrue(wait_for(lambda: len(self._closed()) == 2, timeout=5.0))
+
+    def test_a_sidecar_held_past_every_retry_is_adopted_on_the_next_start(self):
+        old = SegmentInfo.REPLACE_TRIES
+        SegmentInfo.REPLACE_TRIES = 2                 # give up after 0.1 s
+        try:
+            self._start()
+            self.rec.push(grid_block(np.random.default_rng(14)), 0, 0, 5.0, False)
+            self.assertTrue(wait_for(lambda: list(self.dir.glob("*.json")), timeout=3.0))
+            side = sorted(self.dir.glob("*.json"))[0]
+            with open(side, "rb"):
+                self.assertTrue(wait_for(lambda: self.rec.status().sidecars_deferred == 1, timeout=3.0))
+            self.assertTrue(side.with_suffix(".json.tmp").exists())
+            self.assertEqual(SegmentInfo.load(side).state, "open", "the old state is still in place")
+        finally:
+            SegmentInfo.REPLACE_TRIES = old
+        SegmentStore(self.dir).repair_interrupted()
+        self.assertEqual(SegmentInfo.load(side).state, "closed", "the closed state was adopted")
+        self.assertFalse(side.with_suffix(".json.tmp").exists())
+
+    def test_an_unexpected_error_does_not_end_the_recording(self):
+        self._start()
+        real = self.rec._housekeeping
+        calls = {"n": 0}
+
+        def breaks_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("something nobody planned for")
+            real()
+
+        self.rec._housekeeping = breaks_once
+        rng = np.random.default_rng(15)
+        self.rec.push(grid_block(rng), 0, 0, 5.0, False)
+        self.assertTrue(wait_for(lambda: self.rec.status().errors == 1, timeout=3.0))
+        self.assertTrue(self.rec._thread.is_alive(), "the writer thread died")
+        self.rec.push(grid_block(rng), 1, 0, 50.0, False)
+        self.assertTrue(wait_for(lambda: len(self._closed()) >= 2, timeout=5.0),
+                        "nothing was recorded after the error")
+
     def test_changing_only_the_cap_does_not_split_the_recording(self):
         self._start()
         rng = np.random.default_rng(12)

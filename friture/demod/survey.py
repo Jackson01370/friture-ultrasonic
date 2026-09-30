@@ -123,16 +123,26 @@ class SpectrumSurvey:
     # its sidebands, narrower than the 1 kHz spacing of this room's spurs.
     EXTENT_GAP_HZ = 500.0
 
-    def __init__(self, fs: float, nfft: int = 1 << 16, history: int = 32) -> None:
+    def __init__(self, fs: float, nfft: int = 1 << 16, history: int = 32,
+                 keep_every: int = 1) -> None:
+        """keep_every: keep only every k-th window for the steadiness figures.
+
+        The average always uses every window. Keeping a sample of them lets
+        steadiness span a whole minute -- what the recording log wants --
+        without holding 458 windows of 128 kB each (60 MB) to do it.
+        """
         if fs <= 0:
             raise ValueError(f"fs must be > 0, got {fs!r}")
         if nfft < 256 or (nfft & (nfft - 1)):
             raise ValueError(f"nfft must be a power of two >= 256, got {nfft!r}")
         if history < 2:
             raise ValueError(f"history must be >= 2, got {history!r}")
+        if keep_every < 1:
+            raise ValueError(f"keep_every must be >= 1, got {keep_every!r}")
         self.fs = float(fs)
         self.nfft = int(nfft)
         self.history = int(history)
+        self.keep_every = int(keep_every)
         self.hop = self.nfft // 2
         self._window = np.hanning(self.nfft)
         self.freqs = np.fft.rfftfreq(self.nfft, 1.0 / self.fs)
@@ -177,7 +187,8 @@ class SpectrumSurvey:
         while s.size >= self.nfft:
             spec = np.abs(np.fft.rfft(s[:self.nfft] * self._window)) ** 2
             self._sum += spec
-            self._windows.append(spec.astype(np.float32))
+            if self.n_windows_total % self.keep_every == 0:
+                self._windows.append(spec.astype(np.float32))
             made += 1
             self.n_windows_total += 1
             s = s[self.hop:]

@@ -114,11 +114,27 @@ class SegmentInfo:
     clock_drift_ppm: float | None = None
     notes: list = field(default_factory=list)
 
-    def save(self, folder: Path) -> None:
+    # Windows refuses to replace a file that anyone has open -- antivirus, the
+    # search indexer, a program reading the sidecars. Measured: a reader
+    # holding one open made os.replace raise PermissionError, and that killed
+    # the writer thread, ending the recording for good. The refusal lasts as
+    # long as the other side holds the file, usually milliseconds, so the
+    # replace is retried for a while before giving up on this one save.
+    REPLACE_TRIES = 40
+    REPLACE_WAIT_S = 0.05
+
+    def save(self, folder: Path) -> bool:
+        """Write the sidecar atomically. False if it could not be (it is then left as .tmp)."""
         path = folder / (Path(self.wav).stem + ".json")
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(asdict(self), indent=1, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        for attempt in range(self.REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError:
+                time.sleep(self.REPLACE_WAIT_S)
+        return False
 
     @classmethod
     def load(cls, path: Path) -> "SegmentInfo":
@@ -194,7 +210,10 @@ class WavSegmentWriter:
         nominal = (info.run_index + info.n_frames - i0) / info.fs
         if nominal > 300.0:
             info.clock_drift_ppm = 1e6 * (span - nominal) / nominal
-        info.save(self.folder)
+        # False if Windows kept the sidecar locked past every retry: the
+        # closed state is then in <stem>.json.tmp, and the store adopts it
+        # on the next start (SegmentStore.repair_interrupted)
+        self.saved = info.save(self.folder)
         return info
 
 

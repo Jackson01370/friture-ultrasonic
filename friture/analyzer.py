@@ -284,6 +284,10 @@ class Friture(QMainWindow, ):
             text += "  |  %d blocks lost (disk too slow)" % s.dropped_blocks
         if s.over_cap_bytes:
             text += "  |  protected files exceed the cap"
+        if s.analysis_skipped_s:
+            text += "  |  analysis skipped %.0f s (the audio is complete)" % s.analysis_skipped_s
+        if s.errors:
+            text += "  |  recovered from %d error(s), see the log" % s.errors
         vm.recorder_text = text
 
     # event handler
