@@ -69,6 +69,34 @@ Rectangle { // eventually move to ApplicationWindow
                         mainWindow.main_window_view_model.toolbar_view_model.about()
                     }
                 }
+
+                // The continuous recorder. A drive recorder that has quietly
+                // stopped is the failure worth guarding against, so the state
+                // is always on screen: red while writing, amber when it cannot.
+                Row {
+                    id: recorderIndicator
+                    objectName: "recorder_indicator"
+                    Layout.leftMargin: 18
+                    spacing: 6
+                    readonly property string state_: mainWindow.main_window_view_model.toolbar_view_model.recorder_state
+                    visible: state_ !== "off"
+
+                    Rectangle {
+                        width: 12
+                        height: 12
+                        radius: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: recorderIndicator.state_ === "recording" ? "#e0302a"
+                             : recorderIndicator.state_ === "error" ? "#e0a020" : "#8a8a96"
+                    }
+                    Label {
+                        objectName: "recorder_text"
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: mainWindow.main_window_view_model.toolbar_view_model.recorder_text
+                        font.family: mainWindow.fixedFont
+                        color: recorderIndicator.state_ === "error" ? "#c07000" : palette.windowText
+                    }
+                }
             }
         }
 

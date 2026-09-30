@@ -27,10 +27,39 @@ class MainToolbarViewModel(QtCore.QObject):
     settings_clicked = pyqtSignal()
     about_clicked = pyqtSignal()
 
+    # the continuous recorder, for the indicator at the end of the toolbar
+    recorder_text_changed = pyqtSignal(str)
+    recorder_state_changed = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._recording = True
+        self._recorder_text = ""
+        self._recorder_state = "off"
+
+    def get_recorder_text(self) -> str:
+        return self._recorder_text
+
+    def set_recorder_text(self, text: str) -> None:
+        if self._recorder_text != text:
+            self._recorder_text = text
+            self.recorder_text_changed.emit(text)
+
+    recorder_text = pyqtProperty(str, fget=get_recorder_text, fset=set_recorder_text,
+                                 notify=recorder_text_changed)
+
+    def get_recorder_state(self) -> str:
+        return self._recorder_state
+
+    def set_recorder_state(self, state: str) -> None:
+        if self._recorder_state != state:
+            self._recorder_state = state
+            self.recorder_state_changed.emit(state)
+
+    # off / waiting / recording / error
+    recorder_state = pyqtProperty(str, fget=get_recorder_state, fset=set_recorder_state,
+                                  notify=recorder_state_changed)
     
     def get_recording(self) -> bool:
         return self._recording

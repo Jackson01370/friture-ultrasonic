@@ -22,9 +22,12 @@ import logging
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import pyqtSignal, pyqtProperty
-from friture.audiobackend import AudioBackend
+from friture.audiobackend import AudioBackend, SAMPLING_RATE
 from friture.main_toolbar_view_model import MainToolbarViewModel
+from friture.recording.store import BYTES_PER_GB, default_directory, inside_git_worktree
 from friture.ui_settings import Ui_Settings_Dialog
+
+DEFAULT_RECORDING_CAP_GB = 50
 
 no_input_device_title = "No audio input device found"
 
@@ -39,6 +42,8 @@ Friture will now exit.
 class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
     show_playback_changed = pyqtSignal(bool)
     history_length_changed = pyqtSignal(int)
+    # enabled, folder, cap in GB
+    continuous_recording_changed = pyqtSignal(bool, str, int)
 
     def __init__(self, parent, toolbar_view_model: MainToolbarViewModel):
         QtWidgets.QDialog.__init__(self, parent)
@@ -84,6 +89,79 @@ class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
         self.radioButton_duo.toggled.connect(self.duo_input_type_selected)
         self.checkbox_showPlayback.stateChanged.connect(self.show_playback_checkbox_changed)
         self.spinBox_historyLength.editingFinished.connect(self.history_length_edit_finished)
+
+        self._build_recording_group()
+
+    def _build_recording_group(self):
+        """The continuous recording controls, added below Playback.
+
+        Built here rather than in the .ui file so the generated
+        ui_settings.py stays as upstream generated it.
+        """
+        group = QtWidgets.QGroupBox("Continuous recording (all frequencies)", self)
+        form = QtWidgets.QFormLayout(group)
+
+        self.checkbox_recording = QtWidgets.QCheckBox("Record everything the microphone hears", group)
+        self.checkbox_recording.setToolTip(
+            "Writes the raw capture -- every frequency, 16-bit -- to disk for as long as the "
+            "capture runs, in 10-minute files. Any band can be listened to or analysed later.")
+        form.addRow(self.checkbox_recording)
+
+        row = QtWidgets.QHBoxLayout()
+        self.lineEdit_recordingDir = QtWidgets.QLineEdit(str(default_directory()), group)
+        self.lineEdit_recordingDir.setReadOnly(True)
+        self.button_recordingDir = QtWidgets.QPushButton("Browse...", group)
+        row.addWidget(self.lineEdit_recordingDir, 1)
+        row.addWidget(self.button_recordingDir)
+        form.addRow("Folder:", row)
+
+        self.spinBox_recordingCap = QtWidgets.QSpinBox(group)
+        self.spinBox_recordingCap.setRange(1, 5000)
+        self.spinBox_recordingCap.setSuffix(" GB")
+        self.spinBox_recordingCap.setValue(DEFAULT_RECORDING_CAP_GB)
+        form.addRow("Keep at most:", self.spinBox_recordingCap)
+
+        self.label_recordingInfo = QtWidgets.QLabel(group)
+        self.label_recordingInfo.setWordWrap(True)
+        form.addRow(self.label_recordingInfo)
+
+        # below Playback, above the stretch at the bottom
+        self.verticalLayout_5.insertWidget(2, group)
+
+        self.checkbox_recording.setChecked(True)
+        self.checkbox_recording.toggled.connect(self._recording_settings_changed)
+        self.spinBox_recordingCap.editingFinished.connect(self._recording_settings_changed)
+        self.button_recordingDir.clicked.connect(self._choose_recording_dir)
+        self._refresh_recording_info()
+
+    def _refresh_recording_info(self):
+        bytes_per_hour = SAMPLING_RATE * 2 * 3600
+        hours = self.spinBox_recordingCap.value() * BYTES_PER_GB / bytes_per_hour
+        text = ("%.1f GB per hour at %d kHz; %d GB holds about %.0f hours. "
+                "The oldest files are deleted first."
+                % (bytes_per_hour / BYTES_PER_GB, SAMPLING_RATE // 1000,
+                   self.spinBox_recordingCap.value(), hours))
+        repo = inside_git_worktree(self.lineEdit_recordingDir.text())
+        if repo is not None:
+            text += ("\n⚠ This folder is inside the git repository %s. Recordings of a "
+                     "room do not belong in version control -- choose a folder outside it." % repo)
+            self.label_recordingInfo.setStyleSheet("color: #c0392b;")
+        else:
+            self.label_recordingInfo.setStyleSheet("")
+        self.label_recordingInfo.setText(text)
+
+    def _choose_recording_dir(self):
+        chosen = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Folder for continuous recordings", self.lineEdit_recordingDir.text())
+        if chosen:
+            self.lineEdit_recordingDir.setText(chosen)
+            self._recording_settings_changed()
+
+    def _recording_settings_changed(self, *_):
+        self._refresh_recording_info()
+        self.continuous_recording_changed.emit(self.checkbox_recording.isChecked(),
+                                               self.lineEdit_recordingDir.text(),
+                                               self.spinBox_recordingCap.value())
 
     @pyqtProperty(bool, notify=show_playback_changed) # type: ignore
     def show_playback(self) -> bool:
@@ -192,6 +270,9 @@ class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
         settings.setValue("duoInput", self.inputTypeButtonGroup.checkedId())
         settings.setValue("showPlayback", self.checkbox_showPlayback.checkState())
         settings.setValue("historyLength", self.spinBox_historyLength.value())
+        settings.setValue("continuousRecording", self.checkbox_recording.isChecked())
+        settings.setValue("recordingDir", self.lineEdit_recordingDir.text())
+        settings.setValue("recordingCapGB", self.spinBox_recordingCap.value())
 
     # method
     def restoreState(self, settings):
@@ -210,3 +291,11 @@ class Settings_Dialog(QtWidgets.QDialog, Ui_Settings_Dialog):
         self.spinBox_historyLength.setValue(settings.value("historyLength", 30, type=int))
         # need to emit this because setValue doesn't emit editFinished
         self.history_length_changed.emit(self.spinBox_historyLength.value())
+
+        self.checkbox_recording.blockSignals(True)
+        self.checkbox_recording.setChecked(settings.value("continuousRecording", True, type=bool))
+        self.checkbox_recording.blockSignals(False)
+        self.lineEdit_recordingDir.setText(settings.value("recordingDir", str(default_directory()), type=str))
+        self.spinBox_recordingCap.setValue(settings.value("recordingCapGB", DEFAULT_RECORDING_CAP_GB, type=int))
+        # always emitted, changed or not: this is what starts the recorder
+        self._recording_settings_changed()

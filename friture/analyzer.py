@@ -45,7 +45,9 @@ from friture.ui_friture import Ui_MainWindow
 from friture.about import About_Dialog  # About dialog
 from friture.settings import Settings_Dialog  # Setting dialog
 from friture.audiobuffer import AudioBuffer  # audio ring buffer class
-from friture.audiobackend import AudioBackend  # audio backend class
+from friture.audiobackend import AudioBackend, FRAMES_PER_BUFFER, SAMPLING_RATE  # audio backend class
+from friture.recording.recorder import ContinuousRecorder
+from friture.recording.store import BYTES_PER_GB
 from friture.dockmanager import DockManager
 from friture.tilelayout import TileLayout
 from friture.level_view_model import LevelViewModel
@@ -212,6 +214,17 @@ class Friture(QMainWindow, ):
         self.settings_dialog.show_playback_changed.connect(self.show_playback_changed)
         self.settings_dialog.history_length_changed.connect(self.player.set_history_seconds)
 
+        # The continuous recorder takes blocks straight from the capture
+        # thread, not from the display path, so nothing the GUI does can
+        # make it miss one. It starts writing when restoreAppState below
+        # hands it its settings.
+        self.recorder = ContinuousRecorder(SAMPLING_RATE, FRAMES_PER_BUFFER,
+                                           describe_source=self._capture_device_name)
+        self.recorder.start()
+        AudioBackend().add_raw_sink(self.recorder.push)
+        self.settings_dialog.continuous_recording_changed.connect(self.recorder.configure)
+        self.slow_timer.timeout.connect(self.update_recorder_indicator)
+
         # restore the settings and widgets geometries
         self.restoreAppState()
 
@@ -247,9 +260,39 @@ class Friture(QMainWindow, ):
     def about_called(self):
         self.about_dialog.show()
 
+    @staticmethod
+    def _capture_device_name() -> str:
+        device = AudioBackend().device
+        return device["name"] if device else ""
+
+    # slot
+    def update_recorder_indicator(self) -> None:
+        s = self.recorder.status()
+        vm = self._main_window_view_model.toolbar_view_model
+        vm.recorder_state = s.state
+        hours = s.stored_bytes / (SAMPLING_RATE * 2 * 3600)
+        stored = "%.1f of %d GB, %.1f h" % (s.stored_bytes / BYTES_PER_GB, round(s.cap_bytes / BYTES_PER_GB), hours)
+        if s.state == "recording":
+            text = "REC  %s" % stored
+        elif s.state == "waiting":
+            text = "REC paused (capture stopped)  %s" % stored
+        elif s.state == "error":
+            text = "REC STOPPED: %s" % s.message
+        else:
+            text = ""
+        if s.dropped_blocks:
+            text += "  |  %d blocks lost (disk too slow)" % s.dropped_blocks
+        if s.over_cap_bytes:
+            text += "  |  protected files exceed the cap"
+        vm.recorder_text = text
+
     # event handler
     def closeEvent(self, event):
         self.listen_monitor.set_running(False)
+        # the recorder first: stop feeding it, let it write out what is
+        # queued and close its file, then give the device back
+        AudioBackend().remove_raw_sink(self.recorder.push)
+        self.recorder.shutdown()
         AudioBackend().close()
         self.saveAppState()
         event.accept()

@@ -77,6 +77,7 @@ packages=[
     "friture.listen",
     "friture.demod",
     "friture.playback",
+    "friture.recording",
     "friture.plotting",
     "friture.generators",
     "friture.signal",
